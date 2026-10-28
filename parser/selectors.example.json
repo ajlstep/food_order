@@ -1,0 +1,9 @@
+{
+  "item": ".dish",
+  "name": ".title",
+  "price": ".price",
+  "weight": ".weight",
+  "image": "img",
+  "image_attr": "src",
+  "category_heading": "h2.cat"
+}

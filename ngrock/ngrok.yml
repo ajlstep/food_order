@@ -1,0 +1,15 @@
+version: "2"
+authtoken: "3BzFnzhTywC8RvvLmu16Ih6bM7Y_4nWbCwvWz1mJyDXHYQ6Pe"
+tunnels:
+  main:
+    proto: http
+    addr: 192.168.1.250:8080
+    # traffic_policy:
+    #   inbound:
+    #     - expressions:
+    #         - "true"
+    #       actions:
+    #         - type: add-headers
+    #           config:
+    #             headers:
+    #               Authorization: "Basic MUNfQWRtaW46"

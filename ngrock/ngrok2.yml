@@ -1,0 +1,17 @@
+version: "2"
+tunnels:
+  main:
+    proto: http
+    addr: 192.168.100.251:8080
+  on_http_request:
+    - expressions:
+        - "true"
+      actions:
+        - type: "redirect"
+          config:
+            status_code: 301
+            to: "http://192.168.100.251:8080/ralinix_ut/hs/telegramapi"
+        - type: "add-headers"
+          config:
+            headers:
+              Authorization: "Basic MUNfQWRtaW46IzFTdGVwIQ=="

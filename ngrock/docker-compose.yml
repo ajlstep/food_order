@@ -1,0 +1,33 @@
+# services:
+#   app:
+#     image: node:18
+#     ports:
+#       - "3000:3000"
+
+#   ngrok:
+#     image: ngrok/ngrok:latest
+#     environment:
+#       - NGROK_AUTHTOKEN=3BzFnzhTywC8RvvLmu16Ih6bM7Y_4nWbCwvWz1mJyDXHYQ6Pe
+#     command: http 192.168.1.100:8080/ralinix_ut_tg/hs/telegramapi
+#     ports:
+#       - "4040:4040"  # interfata web ngrok
+
+# services:
+#   ngrok:
+#     image: ngrok/ngrok:latest
+#     # environment:
+#     #   - NGROK_AUTHTOKEN=3BzFnzhTywC8RvvLmu16Ih6bM7Y_4nWbCwvWz1mJyDXHYQ6Pe
+#     volumes:
+#       - ./ngrok.yml:/etc/ngrok.yml
+#     command: http 192.168.1.100:8080
+#     ports:
+#       - "4040:4040"
+
+services:
+  ngrok:
+    image: ngrok/ngrok:latest
+    volumes:
+      - ./ngrok.yml:/etc/ngrok.yml
+    command: start --all --config /etc/ngrok.yml
+    ports:
+      - "4040:4040"
