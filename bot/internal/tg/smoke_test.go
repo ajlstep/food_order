@@ -80,7 +80,11 @@ func (f *fakeTelegram) push(updates ...string) {
 }
 
 func from(chat int64) map[string]any {
-	return map[string]any{"id": chat, "is_bot": false, "first_name": "Ion", "username": "ion_md", "language_code": "ro"}
+	nick := fmt.Sprintf("user%d", chat)
+	if chat == 42 {
+		nick = "ion_md"
+	}
+	return map[string]any{"id": chat, "is_bot": false, "first_name": "Ion", "username": nick, "language_code": "ro"}
 }
 
 func update(id int, chat int64, text string) string {

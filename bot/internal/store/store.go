@@ -114,6 +114,30 @@ var migrations = []string{
 		updated_at TEXT NOT NULL,
 		PRIMARY KEY (user_id, for_date)
 	);`,
+	// 2: groups (companies), members, invitations
+	`CREATE TABLE groups (
+		id         INTEGER PRIMARY KEY,
+		name       TEXT NOT NULL,
+		owner_id   INTEGER NOT NULL REFERENCES users(id),
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	);
+	CREATE TABLE group_members (
+		group_id  INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+		user_id   INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE, -- one group per user
+		joined_at TEXT NOT NULL,
+		PRIMARY KEY (group_id, user_id)
+	);
+	CREATE TABLE group_invites (
+		id         INTEGER PRIMARY KEY,
+		group_id   INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+		user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, -- who is invited
+		invited_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		status     TEXT NOT NULL,             -- pending | accepted | declined | expired
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	);
+	CREATE UNIQUE INDEX idx_group_invites_pending ON group_invites (group_id, user_id) WHERE status = 'pending';`,
 }
 
 func (s *Store) migrate(ctx context.Context) error {

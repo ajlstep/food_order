@@ -3,7 +3,7 @@ authtoken: "3BzFnzhTywC8RvvLmu16Ih6bM7Y_4nWbCwvWz1mJyDXHYQ6Pe"
 tunnels:
   main:
     proto: http
-    addr: 192.168.1.250:8080
+    addr: host.docker.internal:8086
     # traffic_policy:
     #   inbound:
     #     - expressions:

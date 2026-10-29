@@ -45,6 +45,42 @@ Numele și nickname-ul se actualizează singure la fiecare mesaj. Telefonul se p
 
 `/stop` → `status = stopped`: nu mai primește recomandări automate, comenzile cer `/start`. Dacă utilizatorul blochează botul, Telegram răspunde 403 și botul îl trece singur pe `stopped`. Datele rămân.
 
+## Grupuri (companii)
+
+Utilizatorii de la aceeași companie se adună într-un grup. Tot în `bot.db`; `core` nu știe de grupuri.
+
+**Reguli**
+- Un utilizator e în **cel mult un grup**.
+- Cine creează grupul îi dă denumirea și devine **owner** (și primul membru).
+- În grup intri **doar prin invitație** de la owner: îți vine mesaj cu „✅ Accept / ❌ Refuz". Invitația expiră în 7 zile.
+- Owner-ul invită după **@nickname** sau **număr de telefon**. Dacă nu există un asemenea utilizator (nu i-a scris botului `/start`, sau nu și-a trimis telefonul), owner-ul primește răspuns că nu există.
+- Owner-ul vede membrii, îi poate scoate, vede statistica grupului sau a fiecărui membru pe o perioadă.
+- Oricine poate ieși. Dacă iese owner-ul, devine owner cel mai vechi membru. **Grupul fără membri se șterge** singur, cu invitațiile lui.
+
+**Tabele**
+
+| Tabel | Ce e în el |
+|---|---|
+| `groups` | `id`, `name`, `owner_id`, date |
+| `group_members` | `(group_id, user_id)`, `joined_at`; `user_id` unic = un singur grup |
+| `group_invites` | `id`, `group_id`, `user_id` (invitat), `invited_by`, `status` (`pending` / `accepted` / `declined` / `expired`), date; cel mult o invitație în așteptare pe grup și persoană |
+
+**Comenzi**
+
+| Comandă | Cine | Ce face |
+|---|---|---|
+| `/grup` | toți | grupul meu (sau cum creez unul) |
+| `/grup nou <denumire>` | cine nu e în grup | creează grupul |
+| `/grup invita @nickname` / `+37369…` | owner | trimite invitația |
+| `/grup membri` | owner | lista, cu buton „❌ Scoate" la fiecare |
+| `/grup elimina @nickname` | owner | scoate un membru |
+| `/grup stat` · `/grup stat 30` · `/grup stat 2026-10-01 2026-10-31` | owner | cât a comandat grupul (total + pe fiecare) |
+| `/grup stat @nickname [perioadă]` | owner | statistica unui membru |
+| `/grup nume <denumire>` | owner | redenumește |
+| `/grup iesi` | toți | ies (cu confirmare) |
+
+Statistica grupului: botul cere la `core` `GET /v1/stats` pentru fiecare membru (cu `X-User-ID`-ul lui) și le adună. Fiecare membru se numără **doar de când e în grup**; cine a ieșit nu mai apare.
+
 ## Cum vede `core` utilizatorul
 
 Fiecare apel HTTP de la bot la `core` (și la `catalog`) are antetul **`X-User-ID: <users.id>`**. `core` ține comenzile, preferințele (alergeni etc.), recomandările și statistica pe `user_id` și nu vede niciodată chat id, nume sau telefon. Evenimentele către bot poartă `user_id`, iar botul găsește chat-ul în `bot.db`:

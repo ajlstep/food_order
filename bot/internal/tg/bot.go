@@ -51,6 +51,17 @@ type Users interface {
 	SetStatus(ctx context.Context, userID int64, status string) error
 	Settings(ctx context.Context, userID int64) (settings.Settings, error)
 	SetSetting(ctx context.Context, userID int64, key, value string) error
+
+	// groups (see store/groups.go for the rules)
+	GroupOf(ctx context.Context, userID int64) (store.Group, error)
+	CreateGroup(ctx context.Context, ownerID int64, name string) (store.Group, error)
+	RenameGroup(ctx context.Context, groupID, ownerID int64, name string) (string, error)
+	Members(ctx context.Context, groupID int64) ([]store.Member, error)
+	FindUser(ctx context.Context, query string) (store.User, error)
+	CreateInvite(ctx context.Context, groupID, ownerID, userID int64) (store.Invite, error)
+	AnswerInvite(ctx context.Context, inviteID, userID int64, accept bool) (store.Invite, store.Group, error)
+	RemoveMember(ctx context.Context, groupID, ownerID, userID int64) (store.LeaveResult, error)
+	LeaveGroup(ctx context.Context, userID int64) (store.LeaveResult, error)
 }
 
 // Options to make a Bot.
@@ -132,10 +143,11 @@ func New(o Options) (*Bot, error) {
 		"setari":     b.onSettings,
 		"profil":     b.onProfile,
 		"stop":       b.onStop,
+		"grup":       b.onGroup,
 	} {
 		api.RegisterHandler(bot.HandlerTypeMessageText, name, bot.MatchTypeCommandStartOnly, h)
 	}
-	for _, kind := range []string{kindOrder, kindForced, kindRate, kindNoNote, kindAllergen, kindDay, kindTime} {
+	for _, kind := range []string{kindOrder, kindForced, kindRate, kindNoNote, kindAllergen, kindDay, kindTime, kindInvite, kindKick, kindLeave} {
 		api.RegisterHandler(bot.HandlerTypeCallbackQueryData, kind+":", bot.MatchTypePrefix, b.onButton)
 	}
 	return b, nil
@@ -152,6 +164,7 @@ func (b *Bot) setCommands(ctx context.Context) {
 		{Command: "stat", Description: "Statistica"},
 		{Command: "setari", Description: "Ora și zilele de comandă"},
 		{Command: "profil", Description: "Numele, nickname-ul, telefonul"},
+		{Command: "grup", Description: "Grupul (compania): invitații, membri, statistică"},
 		{Command: "stop", Description: "Opresc recomandările automate"},
 	}})
 	if err != nil {
@@ -250,6 +263,7 @@ func (b *Bot) auth(next bot.HandlerFunc) bot.HandlerFunc {
 			b.log.Error("user settings", "err", err)
 			st = settings.WithDefaults(nil)
 		}
+		ctx = context.WithValue(ctx, updateKey{}, u)
 		next(withSession(ctx, session{user: usr, settings: st}), api, u)
 	}
 }

@@ -40,6 +40,9 @@ func (b *Bot) onButton(ctx context.Context, api *bot.Bot, u *models.Update) {
 	case kindDay, kindTime:
 		b.settingsButton(ctx, api, q, cb)
 
+	case kindInvite, kindKick, kindLeave:
+		b.groupButton(ctx, q, cb, answer, clear)
+
 	case kindOrder:
 		if cb.Date < b.day(s.settings, 0) {
 			answer("Recomandarea a expirat")

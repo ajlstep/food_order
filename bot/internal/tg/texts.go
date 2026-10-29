@@ -24,6 +24,7 @@ const helpText = `Sunt botul tău de prânz 🍽
 /stat — statistica lunii (/stat 7 = ultimele 7 zile)
 /setari — ora și zilele de comandă
 /profil — numele, nickname-ul, telefonul
+/grup — grupul (compania): creare, invitații, statistică
 /stop — opresc recomandările automate`
 
 const prefsHelp = `Exemple:

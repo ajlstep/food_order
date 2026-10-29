@@ -18,6 +18,9 @@ import (
 //	a:<YYYYMMDD>:<dish_id>:<y|n>                        allergens: yes, it may contain them / no
 //	d:<1..7>                                            settings: switch an order day (ISO weekday)
 //	t:<+30|-30>                                         settings: move the order time (minutes)
+//	gi:<invite_id>:<y|n>                                group: accept / decline an invitation
+//	gk:<user_id>                                        group: the owner removes a member
+//	gl:<group_id>                                       group: confirm leaving
 const (
 	kindOrder    = "o"
 	kindForced   = "f"
@@ -26,6 +29,9 @@ const (
 	kindAllergen = "a"
 	kindDay      = "d"
 	kindTime     = "t"
+	kindInvite   = "gi"
+	kindKick     = "gk"
+	kindLeave    = "gl"
 )
 
 const callbackMax = 64
@@ -40,8 +46,9 @@ type Callback struct {
 	OrderID int64
 	Rating  int
 	Yes     bool
-	Day     int // ISO weekday, 1 = Monday
-	Minutes int // time shift
+	Day     int   // ISO weekday, 1 = Monday
+	Minutes int   // time shift
+	ID      int64 // invite id, user id or group id (group buttons)
 }
 
 var errBadCallback = errors.New("bad callback data")
@@ -75,6 +82,18 @@ func encodeDay(isoDay int) string { return join(kindDay, strconv.Itoa(isoDay)) }
 func encodeTime(minutes int) string {
 	return join(kindTime, fmt.Sprintf("%+d", minutes))
 }
+
+func encodeInvite(inviteID int64, accept bool) string {
+	yn := "n"
+	if accept {
+		yn = "y"
+	}
+	return join(kindInvite, strconv.FormatInt(inviteID, 10), yn)
+}
+
+func encodeKick(userID int64) string { return join(kindKick, strconv.FormatInt(userID, 10)) }
+
+func encodeLeave(groupID int64) string { return join(kindLeave, strconv.FormatInt(groupID, 10)) }
 
 func join(parts ...string) string {
 	s := strings.Join(parts, ":")
@@ -164,6 +183,21 @@ func decodeCallback(data string) (Callback, error) {
 			return cb, bad
 		}
 		if cb.Minutes, err = strconv.Atoi(p[1]); err != nil || cb.Minutes == 0 || cb.Minutes < -720 || cb.Minutes > 720 {
+			return cb, bad
+		}
+	case kindInvite:
+		if len(p) != 3 || (p[2] != "y" && p[2] != "n") {
+			return cb, bad
+		}
+		if cb.ID, err = strconv.ParseInt(p[1], 10, 64); err != nil || cb.ID <= 0 {
+			return cb, bad
+		}
+		cb.Yes = p[2] == "y"
+	case kindKick, kindLeave:
+		if len(p) != 2 {
+			return cb, bad
+		}
+		if cb.ID, err = strconv.ParseInt(p[1], 10, 64); err != nil || cb.ID <= 0 {
 			return cb, bad
 		}
 	default:
