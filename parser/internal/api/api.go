@@ -61,12 +61,12 @@ func New(g Getter, loc *time.Location, now func() time.Time, log *slog.Logger) h
 				out.Items = append(out.Items, itemDTO{Item: it, NameNorm: menu.NormName(it.Name)})
 			}
 			writeJSON(w, http.StatusOK, out)
+		case errors.As(err, &th): // first: a throttled answer also wraps the last outcome
+			w.Header().Set("Retry-After", strconv.Itoa(int(th.RetryAfter.Seconds())+1))
+			writeErr(w, http.StatusTooManyRequests, "throttled", th.Error())
 		case errors.Is(err, menu.ErrEmpty):
 			log.Warn("menu is empty", "date", res.Date, "asked", date.Format("2006-01-02"))
 			writeErr(w, http.StatusNotFound, "menu_empty", "no dishes found for this date (not published yet or site changed)")
-		case errors.As(err, &th):
-			w.Header().Set("Retry-After", strconv.Itoa(int(th.RetryAfter.Seconds())+1))
-			writeErr(w, http.StatusTooManyRequests, "throttled", th.Error())
 		case errors.Is(err, context.DeadlineExceeded):
 			writeErr(w, http.StatusGatewayTimeout, "timeout", "the site did not answer in time")
 		default:

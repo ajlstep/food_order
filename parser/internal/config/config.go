@@ -24,6 +24,10 @@ type Config struct {
 	// SiteURL is the page to download; {date} is replaced with YYYY-MM-DD.
 	// Empty means the default URL of the chosen source.
 	SiteURL string
+	// SiteWeekURL is the second chance, asked when the first page cannot be
+	// parsed or has no dishes; {week} becomes the ISO week (2026-W44).
+	// Empty means SiteURL (or its default) with &week={week} added.
+	SiteWeekURL string
 	// UserAgent is sent with every request to the site.
 	UserAgent string
 	// HTTPTimeout is the timeout of one request to the site.
@@ -43,12 +47,24 @@ type Config struct {
 	// RawDir is where the page of the last successful run is saved
 	// ("" turns it off).
 	RawDir string
+
+	// NATSEnabled: listen to food.menu.requested on NATS (the normal flow).
+	// false = HTTP only (GET /v1/fetch, for debugging).
+	NATSEnabled  bool
+	NATSURL      string
+	NATSToken    string // either a token, or user + password
+	NATSUser     string
+	NATSPassword string
+	// NATSStream is created by core; the parser waits for it.
+	NATSStream  string
+	NATSDurable string
 }
 
 // Variable names.
 const (
 	EnvSource      = "PARSER_SOURCE"
 	EnvSiteURL     = "PARSER_SITE_URL"
+	EnvSiteWeekURL = "PARSER_SITE_URL_WEEK"
 	EnvUserAgent   = "PARSER_USER_AGENT"
 	EnvHTTPTimeout = "PARSER_HTTP_TIMEOUT"
 	EnvAddr        = "PARSER_ADDR"
@@ -56,6 +72,14 @@ const (
 	EnvCacheTTL    = "PARSER_CACHE_TTL"
 	EnvMinInterval = "PARSER_MIN_INTERVAL"
 	EnvRawDir      = "PARSER_RAW_DIR"
+
+	EnvNATSEnabled  = "PARSER_NATS_ENABLED"
+	EnvNATSURL      = "PARSER_NATS_URL"
+	EnvNATSToken    = "PARSER_NATS_TOKEN"
+	EnvNATSUser     = "PARSER_NATS_USER"
+	EnvNATSPassword = "PARSER_NATS_PASSWORD"
+	EnvNATSStream   = "PARSER_NATS_STREAM"
+	EnvNATSDurable  = "PARSER_NATS_DURABLE"
 )
 
 // Defaults.
@@ -63,11 +87,14 @@ const (
 	DefaultSource      = "bistro"
 	DefaultUserAgent   = "food-order-parser/1.0 (personal menu reader)"
 	DefaultHTTPTimeout = 30 * time.Second
-	DefaultAddr        = ":8082"
+	DefaultAddr        = ":8083" // catalog is on 8082
 	DefaultTZ          = "Europe/Chisinau"
 	DefaultCacheTTL    = 3 * time.Hour
 	DefaultMinInterval = 10 * time.Minute
 	DefaultRawDir      = "data/raw"
+	DefaultNATSURL     = "nats://nats:4222"
+	DefaultNATSStream  = "FOOD"
+	DefaultNATSDurable = "parser"
 )
 
 // Load reads the configuration. envFile is the path of a .env file; a missing
@@ -92,6 +119,7 @@ func fromLookup(get func(string) string) (Config, error) {
 	cfg := Config{
 		Source:      l.str(EnvSource, DefaultSource),
 		SiteURL:     l.str(EnvSiteURL, ""),
+		SiteWeekURL: l.str(EnvSiteWeekURL, ""),
 		UserAgent:   l.str(EnvUserAgent, DefaultUserAgent),
 		HTTPTimeout: l.duration(EnvHTTPTimeout, DefaultHTTPTimeout),
 		Addr:        l.str(EnvAddr, DefaultAddr),
@@ -99,9 +127,23 @@ func fromLookup(get func(string) string) (Config, error) {
 		CacheTTL:    l.duration(EnvCacheTTL, DefaultCacheTTL),
 		MinInterval: l.duration(EnvMinInterval, DefaultMinInterval),
 		RawDir:      l.str(EnvRawDir, DefaultRawDir),
+
+		NATSEnabled:  l.boolean(EnvNATSEnabled, true),
+		NATSURL:      l.str(EnvNATSURL, DefaultNATSURL),
+		NATSToken:    l.str(EnvNATSToken, ""),
+		NATSUser:     l.str(EnvNATSUser, ""),
+		NATSPassword: l.str(EnvNATSPassword, ""),
+		NATSStream:   l.str(EnvNATSStream, DefaultNATSStream),
+		NATSDurable:  l.str(EnvNATSDurable, DefaultNATSDurable),
 	}
 	if cfg.SiteURL != "" {
 		l.checkURL(EnvSiteURL, cfg.SiteURL)
+	}
+	if cfg.SiteWeekURL != "" {
+		l.checkURL(EnvSiteWeekURL, cfg.SiteWeekURL)
+	}
+	if cfg.NATSToken != "" && cfg.NATSUser != "" {
+		l.fail(EnvNATSToken, "set either %s or %s/%s, not both", EnvNATSToken, EnvNATSUser, EnvNATSPassword)
 	}
 
 	if err := errors.Join(l.errs...); err != nil {
@@ -141,6 +183,20 @@ func (l *loader) duration(key string, def time.Duration) time.Duration {
 		l.fail(key, "must be greater than zero, got %q", v)
 	}
 	return d
+}
+
+func (l *loader) boolean(key string, def bool) bool {
+	v := strings.ToLower(strings.TrimSpace(l.get(key)))
+	switch v {
+	case "":
+		return def
+	case "1", "true", "yes", "da", "on":
+		return true
+	case "0", "false", "no", "nu", "off":
+		return false
+	}
+	l.fail(key, "%q: expected true or false", v)
+	return def
 }
 
 func (l *loader) location(key, def string) *time.Location {

@@ -32,6 +32,7 @@ type entry struct {
 	items       []Item
 	fetchedAt   time.Time
 	lastAttempt time.Time
+	lastErr     error // outcome of the last attempt (nil = it worked)
 }
 
 func NewService(f Fetcher, ttl, minInterval time.Duration) *Service {
@@ -57,7 +58,7 @@ func (s *Service) Get(ctx context.Context, date time.Time) (Result, error) {
 		return Result{Date: key, Items: e.items, FetchedAt: e.fetchedAt, Cached: true}, nil
 	}
 	if e != nil && now.Sub(e.lastAttempt) < s.minInterval {
-		return Result{}, &ThrottledError{RetryAfter: s.minInterval - now.Sub(e.lastAttempt)}
+		return Result{}, &ThrottledError{RetryAfter: s.minInterval - now.Sub(e.lastAttempt), Last: e.lastErr}
 	}
 	if e == nil {
 		e = &entry{}
@@ -66,11 +67,12 @@ func (s *Service) Get(ctx context.Context, date time.Time) (Result, error) {
 	e.lastAttempt = now
 
 	items, err := s.fetcher.Fetch(ctx, date)
+	if err == nil && len(items) == 0 {
+		err = ErrEmpty
+	}
+	e.lastErr = err
 	if err != nil {
 		return Result{}, err
-	}
-	if len(items) == 0 {
-		return Result{}, ErrEmpty
 	}
 	e.items, e.fetchedAt = items, now
 	return Result{Date: key, Items: items, FetchedAt: now}, nil

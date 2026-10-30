@@ -185,7 +185,12 @@ func (b *Bot) groupMembers(ctx context.Context, g store.Group) {
 		b.fail(ctx, "members", err)
 		return
 	}
-	b.replyWith(ctx, membersText(g, members), membersKeyboard(g, members))
+	kb := membersKeyboard(g, members)
+	if len(kb.InlineKeyboard) == 0 { // only the owner: nothing to remove, no keyboard
+		b.reply(ctx, membersText(g, members)+"\n\nInvită colegii: <code>/grup invita @nickname</code>")
+		return
+	}
+	b.replyWith(ctx, membersText(g, members), kb)
 }
 
 func (b *Bot) groupKickByQuery(ctx context.Context, g store.Group, query string) {

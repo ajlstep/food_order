@@ -99,6 +99,15 @@ func TestGroupFlow(t *testing.T) {
 	if got := say(101, "/grup nou   Endava  Chișinău "); !strings.Contains(got, "Am creat grupul «Endava Chișinău»") {
 		t.Fatalf("create: %q", got)
 	}
+	// only the owner: the list must still be sent, without a keyboard
+	n0 := tgFake.countTo("101")
+	say(101, "/grup membri")
+	if m := tgFake.lastTo("101"); tgFake.countTo("101") != n0+1 || !strings.Contains(m["text"], "1 membri") || strings.Contains(m["reply_markup"], "null") {
+		t.Fatalf("members of a one-person group = %v", m)
+	}
+	if kb := membersKeyboard(store.Group{OwnerID: 1}, nil); kb.InlineKeyboard == nil {
+		t.Fatal("keyboard rows must never be nil")
+	}
 	if got := say(101, "/grup invita @nobody"); !strings.Contains(got, "Nu există așa utilizator") {
 		t.Fatalf("unknown user: %q", got)
 	}

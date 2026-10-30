@@ -21,6 +21,9 @@
 // data they are two different dishes, even though on the plate Maxi is Stand + soup.
 // The components of Maxi are the soup followed by the components of Stand.
 // Pictures and stock are not read.
+//
+// When the page of the date cannot be parsed or has no dishes, the same
+// page with the ISO week is tried once: ?date=2026-10-30&week=2026-W44.
 package bistro
 
 import (
@@ -42,6 +45,32 @@ import (
 // DefaultURL is the catalog page; {date} is replaced with YYYY-MM-DD.
 const DefaultURL = "https://bistro.md/ro/catalog?date={date}"
 
+// WeekURL makes the second-chance page from the first one: the same URL
+// with &week={week} (ISO week of the date, e.g. 2026-W44), as in
+// https://bistro.md/ro/catalog?date=2026-10-30&week=2026-W44.
+// A template that already has {week} is kept as it is.
+func WeekURL(tmpl string) string {
+	if strings.Contains(tmpl, "{week}") {
+		return tmpl
+	}
+	sep := "&"
+	if !strings.Contains(tmpl, "?") {
+		sep = "?"
+	}
+	return tmpl + sep + "week={week}"
+}
+
+// ISOWeek formats the ISO week of a date as the site wants it: 2026-W44.
+func ISOWeek(date time.Time) string {
+	y, w := date.ISOWeek()
+	return fmt.Sprintf("%d-W%02d", y, w)
+}
+
+// fill puts the date and its week into a URL template.
+func fill(tmpl string, date time.Time) string {
+	return strings.NewReplacer("{date}", date.Format("2006-01-02"), "{week}", ISOWeek(date)).Replace(tmpl)
+}
+
 const (
 	maxBody = 5 << 20 // 5 MiB is plenty for one page
 
@@ -58,19 +87,59 @@ const (
 // Fetcher downloads the catalog page for a date and parses it.
 type Fetcher struct {
 	URLTemplate string // default DefaultURL
-	UserAgent   string
-	Client      *http.Client
-	Raw         menu.RawStore // keeps the page of the last successful run
-	Log         *slog.Logger
+	// WeekURLTemplate is the second chance, asked only when the first page
+	// cannot be parsed or has no dishes. Default: WeekURL(URLTemplate).
+	WeekURLTemplate string
+	UserAgent       string
+	Client          *http.Client
+	Raw             menu.RawStore // keeps the page of the last successful run
+	Log             *slog.Logger
 }
 
+// Fetch reads the menu of a date. If the page of the date cannot be parsed
+// or has no dishes, the same page with the week (&week=2026-W44) is tried
+// once; if that one gives no dishes either, the answer of the first page
+// stands. A site that does not answer is not asked twice.
 func (f *Fetcher) Fetch(ctx context.Context, date time.Time) ([]menu.Item, error) {
 	tmpl := f.URLTemplate
 	if tmpl == "" {
 		tmpl = DefaultURL
 	}
-	pageURL := strings.ReplaceAll(tmpl, "{date}", date.Format("2006-01-02"))
+	pageURL := fill(tmpl, date)
+	items, err := f.fetchPage(ctx, pageURL)
+	if err == nil && len(items) > 0 {
+		return items, nil
+	}
+	if err != nil && !errors.Is(err, menu.ErrParseFailed) {
+		return nil, err // the site is down: asking again right away would not help
+	}
 
+	weekTmpl := f.WeekURLTemplate
+	if weekTmpl == "" {
+		weekTmpl = WeekURL(tmpl)
+	}
+	weekURL := fill(weekTmpl, date)
+	if weekURL == pageURL {
+		return items, err
+	}
+	why := "no dishes"
+	if err != nil {
+		why = err.Error()
+	}
+	f.log().Info("date page gave nothing, trying the week page", "date", date.Format("2006-01-02"), "why", why, "url", weekURL)
+	weekItems, weekErr := f.fetchPage(ctx, weekURL)
+	if weekErr == nil && len(weekItems) > 0 {
+		return weekItems, nil
+	}
+	if weekErr != nil {
+		f.log().Warn("week page failed too", "url", weekURL, "err", weekErr)
+	}
+	return items, err
+}
+
+// fetchPage downloads one page and parses it; the raw page is kept only
+// when it gave dishes.
+func (f *Fetcher) fetchPage(ctx context.Context, pageURL string) ([]menu.Item, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("bad site url %q: %w", pageURL, err)
@@ -85,15 +154,15 @@ func (f *Fetcher) Fetch(ctx context.Context, date time.Time) ([]menu.Item, error
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("request %s: %w", pageURL, err)
+		return nil, fmt.Errorf("%w: request %s: %w", menu.ErrSourceUnavailable, pageURL, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return nil, fmt.Errorf("site answered %s for %s", resp.Status, pageURL)
+		return nil, fmt.Errorf("%w: site answered %s for %s", menu.ErrSourceUnavailable, resp.Status, pageURL)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", pageURL, err)
+		return nil, fmt.Errorf("%w: read %s: %w", menu.ErrSourceUnavailable, pageURL, err)
 	}
 
 	items, err := Parse(body)
@@ -101,11 +170,18 @@ func (f *Fetcher) Fetch(ctx context.Context, date time.Time) ([]menu.Item, error
 		return nil, err
 	}
 	if len(items) > 0 { // keep the raw page only for runs that worked
-		if err := f.Raw.Save("bistro_last_ok.html", body); err != nil && f.Log != nil {
-			f.Log.Warn("could not save raw page", "err", err)
+		if err := f.Raw.Save("bistro_last_ok.html", body); err != nil {
+			f.log().Warn("could not save raw page", "err", err)
 		}
 	}
 	return items, nil
+}
+
+func (f *Fetcher) log() *slog.Logger {
+	if f.Log == nil {
+		return slog.New(slog.DiscardHandler)
+	}
+	return f.Log
 }
 
 // Parse extracts the dishes from the catalog page.
@@ -116,7 +192,7 @@ func (f *Fetcher) Fetch(ctx context.Context, date time.Time) ([]menu.Item, error
 func Parse(body []byte) ([]menu.Item, error) {
 	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("bistro: parse html: %w", err)
+		return nil, fmt.Errorf("%w: bistro: parse html: %w", menu.ErrParseFailed, err)
 	}
 
 	var items []menu.Item
@@ -130,7 +206,7 @@ func Parse(body []byte) ([]menu.Item, error) {
 	})
 
 	if cards > 0 && len(items) == 0 {
-		return nil, errors.New("bistro: found menu cards but no dishes in them; the site layout has probably changed")
+		return nil, fmt.Errorf("%w: bistro: found menu cards but no dishes in them; the site layout has probably changed", menu.ErrParseFailed)
 	}
 	return items, nil
 }

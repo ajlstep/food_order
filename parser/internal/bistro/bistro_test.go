@@ -2,6 +2,7 @@ package bistro
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -156,5 +157,123 @@ func TestFetchBadStatusAndEmptyDoNotSaveRaw(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
 		t.Errorf("raw page must be kept only for successful runs, found %d files", len(entries))
+	}
+}
+
+func TestISOWeekAndWeekURL(t *testing.T) {
+	for date, want := range map[string]string{
+		"2026-10-30": "2026-W44", // the example from the site
+		"2026-10-26": "2026-W44",
+		"2026-11-02": "2026-W45",
+		"2027-01-01": "2026-W53", // the ISO year of a date can be the year before
+		"2026-01-05": "2026-W02",
+	} {
+		d, _ := time.Parse("2006-01-02", date)
+		if got := ISOWeek(d); got != want {
+			t.Errorf("ISOWeek(%s) = %s, want %s", date, got, want)
+		}
+	}
+	d, _ := time.Parse("2006-01-02", "2026-10-30")
+	if got := fill(WeekURL(DefaultURL), d); got != "https://bistro.md/ro/catalog?date=2026-10-30&week=2026-W44" {
+		t.Errorf("week url = %s", got)
+	}
+	if got := WeekURL("http://x/menu"); got != "http://x/menu?week={week}" {
+		t.Errorf("without a query: %s", got)
+	}
+	if got := WeekURL("http://x/?w={week}&d={date}"); got != "http://x/?w={week}&d={date}" {
+		t.Errorf("a template with {week} is kept: %s", got)
+	}
+}
+
+// pages: what the fake site answers with and without the week parameter.
+func fakeSite(t *testing.T, plain, withWeek []byte) (*httptest.Server, *[]string) {
+	t.Helper()
+	var asked []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked = append(asked, r.URL.RawQuery)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if r.URL.Query().Get("week") != "" {
+			w.Write(withWeek)
+			return
+		}
+		w.Write(plain)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &asked
+}
+
+var (
+	emptyPage   = []byte(`<html><body><div id="_catalog-complex"></div></body></html>`)
+	changedPage = []byte(`<div id="_catalog-complex"><div class="main-catalog__product"><p class=" product__name">LUNCH 1</p></div></div>`)
+	day30       = time.Date(2026, 10, 30, 0, 0, 0, 0, time.UTC)
+)
+
+func TestFetchWeekWhenDatePageIsEmpty(t *testing.T) {
+	srv, asked := fakeSite(t, emptyPage, catalog(t))
+	dir := t.TempDir()
+	f := &Fetcher{URLTemplate: srv.URL + "/ro/catalog?date={date}", Raw: menu.RawStore{Dir: dir}}
+	items, err := f.Fetch(context.Background(), day30)
+	if err != nil || len(items) != 8 {
+		t.Fatalf("items=%d err=%v", len(items), err)
+	}
+	want := []string{"date=2026-10-30", "date=2026-10-30&week=2026-W44"}
+	if !reflect.DeepEqual(*asked, want) {
+		t.Errorf("asked %q, want %q", *asked, want)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "bistro_last_ok.html")); err != nil {
+		t.Errorf("raw page of the week run not saved: %v", err)
+	}
+}
+
+func TestFetchWeekWhenDatePageCannotBeParsed(t *testing.T) {
+	srv, asked := fakeSite(t, changedPage, catalog(t))
+	f := &Fetcher{URLTemplate: srv.URL + "/ro/catalog?date={date}"}
+	items, err := f.Fetch(context.Background(), day30)
+	if err != nil || len(items) != 8 || len(*asked) != 2 {
+		t.Fatalf("items=%d err=%v asked=%q", len(items), err, *asked)
+	}
+}
+
+func TestFetchNoWeekWhenDatePageWorks(t *testing.T) {
+	srv, asked := fakeSite(t, catalog(t), emptyPage)
+	f := &Fetcher{URLTemplate: srv.URL + "/ro/catalog?date={date}"}
+	if items, err := f.Fetch(context.Background(), day30); err != nil || len(items) != 8 || len(*asked) != 1 {
+		t.Fatalf("items=%d err=%v asked=%q", len(items), err, *asked)
+	}
+}
+
+func TestFetchFirstAnswerStandsWhenWeekGivesNothing(t *testing.T) {
+	// empty + empty: still "no menu"
+	srv, asked := fakeSite(t, emptyPage, emptyPage)
+	f := &Fetcher{URLTemplate: srv.URL + "/ro/catalog?date={date}"}
+	if items, err := f.Fetch(context.Background(), day30); err != nil || len(items) != 0 || len(*asked) != 2 {
+		t.Fatalf("items=%d err=%v asked=%q", len(items), err, *asked)
+	}
+	// changed + empty: the date page said "site changed", that stands
+	srv, _ = fakeSite(t, changedPage, emptyPage)
+	f = &Fetcher{URLTemplate: srv.URL + "/ro/catalog?date={date}"}
+	if _, err := f.Fetch(context.Background(), day30); !errors.Is(err, menu.ErrParseFailed) {
+		t.Fatalf("want parse failed, got %v", err)
+	}
+}
+
+func TestFetchSiteDownIsNotAskedTwice(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		http.Error(w, "down", http.StatusBadGateway)
+	}))
+	defer srv.Close()
+	f := &Fetcher{URLTemplate: srv.URL + "/ro/catalog?date={date}"}
+	if _, err := f.Fetch(context.Background(), day30); !errors.Is(err, menu.ErrSourceUnavailable) || calls != 1 {
+		t.Fatalf("err=%v calls=%d", err, calls)
+	}
+}
+
+func TestFetchCustomWeekURL(t *testing.T) {
+	srv, asked := fakeSite(t, emptyPage, catalog(t))
+	f := &Fetcher{URLTemplate: srv.URL + "/ro/catalog?date={date}", WeekURLTemplate: srv.URL + "/ro/catalog?week={week}&date={date}"}
+	if items, err := f.Fetch(context.Background(), day30); err != nil || len(items) != 8 || (*asked)[1] != "week=2026-W44&date=2026-10-30" {
+		t.Fatalf("items=%d err=%v asked=%q", len(items), err, *asked)
 	}
 }

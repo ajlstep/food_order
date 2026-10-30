@@ -80,6 +80,9 @@ func TestServiceEmptyIsReportedAndThrottled(t *testing.T) {
 	if _, err := s.Get(context.Background(), day); !errors.As(err, &th) || f.calls != 1 {
 		t.Fatalf("want ThrottledError without a new request, got %v calls=%d", err, f.calls)
 	}
+	if !errors.Is(th, ErrEmpty) {
+		t.Errorf("a throttled answer must carry the last outcome: %v", th)
+	}
 	clock = clock.Add(11 * time.Minute)
 	if _, err := s.Get(context.Background(), day); !errors.Is(err, ErrEmpty) || f.calls != 2 {
 		t.Fatalf("after the interval the site is asked again: %v calls=%d", err, f.calls)
@@ -90,6 +93,11 @@ func TestServiceFetchErrorPassesThrough(t *testing.T) {
 	boom := errors.New("boom")
 	s := NewService(&fakeFetcher{err: boom}, time.Hour, time.Minute)
 	if _, err := s.Get(context.Background(), day); !errors.Is(err, boom) {
+		t.Fatalf("got %v", err)
+	}
+	// asked again at once: throttled, but it still says what went wrong
+	var th *ThrottledError
+	if _, err := s.Get(context.Background(), day); !errors.As(err, &th) || !errors.Is(err, boom) {
 		t.Fatalf("got %v", err)
 	}
 }

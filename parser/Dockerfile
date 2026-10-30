@@ -1,4 +1,4 @@
-FROM golang:1.24-alpine AS build
+FROM golang:1.25-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -10,5 +10,5 @@ RUN apk add --no-cache ca-certificates && adduser -D app && mkdir /data && chown
 COPY --from=build /out/parser /usr/local/bin/parser
 USER app
 ENV PARSER_RAW_DIR=/data/raw
-EXPOSE 8082
+EXPOSE 8083
 ENTRYPOINT ["parser"]

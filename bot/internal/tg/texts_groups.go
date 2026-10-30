@@ -117,8 +117,10 @@ func membersText(g store.Group, members []store.Member) string {
 	return b.String()
 }
 
+// membersKeyboard: one "remove" button per member (not the owner). Never nil:
+// Telegram refuses "inline_keyboard": null.
 func membersKeyboard(g store.Group, members []store.Member) models.InlineKeyboardMarkup {
-	var rows [][]models.InlineKeyboardButton
+	rows := [][]models.InlineKeyboardButton{}
 	for _, m := range members {
 		if m.User.ID == g.OwnerID {
 			continue

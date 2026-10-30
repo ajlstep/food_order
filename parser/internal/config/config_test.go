@@ -18,7 +18,7 @@ func TestDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Source != "bistro" || cfg.SiteURL != "" || cfg.Addr != ":8082" ||
+	if cfg.Source != "bistro" || cfg.SiteURL != "" || cfg.Addr != ":8083" ||
 		cfg.HTTPTimeout != 30*time.Second || cfg.CacheTTL != 3*time.Hour ||
 		cfg.MinInterval != 10*time.Minute || cfg.RawDir != "data/raw" ||
 		cfg.UserAgent != DefaultUserAgent || cfg.Location.String() != "Europe/Chisinau" {
@@ -37,6 +37,9 @@ func TestValues(t *testing.T) {
 		EnvCacheTTL:    "90m",
 		EnvMinInterval: "1m",
 		EnvRawDir:      "/tmp/raw",
+		EnvNATSEnabled: "false",
+		EnvNATSURL:     "nats://localhost:4222",
+		EnvNATSToken:   "secret",
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -45,6 +48,8 @@ func TestValues(t *testing.T) {
 		Source: "bistro", SiteURL: "https://bistro.md/ru/katalog?date={date}", UserAgent: "my-agent",
 		HTTPTimeout: 5 * time.Second, Addr: "127.0.0.1:9000", Location: time.UTC,
 		CacheTTL: 90 * time.Minute, MinInterval: time.Minute, RawDir: "/tmp/raw",
+		NATSEnabled: false, NATSURL: "nats://localhost:4222", NATSToken: "secret",
+		NATSStream: DefaultNATSStream, NATSDurable: DefaultNATSDurable,
 	}
 	if !reflect.DeepEqual(cfg, want) {
 		t.Errorf("got %+v\nwant %+v", cfg, want)
@@ -57,11 +62,14 @@ func TestAllProblemsReportedTogether(t *testing.T) {
 		EnvCacheTTL:    "-5m",
 		EnvTZ:          "Mars/Base",
 		EnvSiteURL:     "bistro.md/catalog",
+		EnvNATSEnabled: "maybe",
+		EnvNATSToken:   "t",
+		EnvNATSUser:    "u",
 	}))
 	if err == nil {
 		t.Fatal("expected an error")
 	}
-	for _, key := range []string{EnvHTTPTimeout, EnvCacheTTL, EnvTZ, EnvSiteURL} {
+	for _, key := range []string{EnvHTTPTimeout, EnvCacheTTL, EnvTZ, EnvSiteURL, EnvNATSEnabled, EnvNATSToken} {
 		if !strings.Contains(err.Error(), key) {
 			t.Errorf("error does not mention %s: %v", key, err)
 		}
