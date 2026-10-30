@@ -5,7 +5,7 @@
 // It saves the menu the source sends (food.menu.fetched), asks llm only for
 // what is missing (food.dish.analyze.requested, food.dish.embed.requested),
 // and tells core when the requested menu is complete (food.menu.ready).
-// HTTP (:8082) for core and bot. All settings live in internal/config
+// HTTP (:9082) for core and bot. All settings live in internal/config
 // (see .env.example).
 package main
 

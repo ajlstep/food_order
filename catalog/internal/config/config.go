@@ -86,7 +86,7 @@ func Defaults() Config {
 func FromLookup(get func(string) (string, bool)) (Config, error) {
 	l := loader{get: get}
 	cfg := Config{
-		Addr:     l.str(EnvAddr, ":8082"),
+		Addr:     l.str(EnvAddr, ":9082"),
 		DBPath:   l.str(EnvDBPath, "data/catalog.db"),
 		Location: l.location(EnvTZ, "Europe/Chisinau"),
 

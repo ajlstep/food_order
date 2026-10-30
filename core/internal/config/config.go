@@ -178,10 +178,10 @@ func Defaults() Config {
 func FromLookup(get func(string) (string, bool)) (Config, error) {
 	l := loader{get: get}
 	cfg := Config{
-		Addr:        l.str(EnvAddr, ":8081"),
+		Addr:        l.str(EnvAddr, ":9081"),
 		DBPath:      l.str(EnvDBPath, "data/core.db"),
 		Location:    l.location(EnvTZ, "Europe/Chisinau"),
-		CatalogURL:  strings.TrimRight(l.str(EnvCatalogURL, "http://catalog:8082"), "/"),
+		CatalogURL:  strings.TrimRight(l.str(EnvCatalogURL, "http://catalog:9082"), "/"),
 		HTTPTimeout: l.duration(EnvHTTPTimeout, 10*time.Second),
 
 		NATSURL:      l.optional(EnvNATSURL, "nats://nats:4222"),

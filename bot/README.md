@@ -96,7 +96,7 @@ food.alert                  {"service": "core", "level": "error", "text": "...",
 **Webhook (implicit, `BOT_MODE=webhook`).** La pornire botul îi spune lui Telegram (`setWebhook`): „trimite-mi totul la `BOT_WEBHOOK_URL`, cu antetul secret `BOT_WEBHOOK_SECRET`”. De atunci, la fiecare mesaj sau buton apăsat, **Telegram face `POST`** la adresa asta. Botul verifică antetul `X-Telegram-Bot-Api-Secret-Token` (altfel 401) și dă update-ul handler-ilor. Dacă botul e oprit, Telegram păstrează update-urile până la 24 h și le trimite când revine.
 
 ```
-Telegram ──HTTPS POST──▶ ajl.duckdns.org:443 ──▶ reverse proxy ──HTTP──▶ bot:8086/tg/webhook
+Telegram ──HTTPS POST──▶ ajl.duckdns.org:443 ──▶ reverse proxy ──HTTP──▶ bot:9001/tg/webhook
 ```
 
 Ce trebuie pe server:
@@ -107,12 +107,12 @@ Ce trebuie pe server:
 ```
 ajl.duckdns.org {
     handle /tg/webhook {
-        reverse_proxy bot:8086
+        reverse_proxy bot:9001
     }
 }
 ```
 
-nginx: `location = /tg/webhook { proxy_pass http://bot:8086; }`.
+nginx: `location = /tg/webhook { proxy_pass http://bot:9001; }`.
 
 Secretul: `openssl rand -hex 32`. Verificare din partea Telegram: `https://api.telegram.org/bot<TOKEN>/getWebhookInfo` (arată URL-ul, câte update-uri așteaptă și ultima eroare).
 
@@ -159,7 +159,7 @@ Tipurile sunt în `internal/contracts`. Câmpurile de mai jos le-am ales eu — 
 - `GET /v1/stats` întoarce `{orders, spent, forced, avg_rating, kcal{min,max}, protein_g, fat_g, carbs_g, without_nutrition, top_dishes[]}`.
 - Opțional în `picks`: `kcal_min`, `kcal_max`, `allergens_possible[]` (dacă `core` le pune, botul le afișează).
 - Confirmarea alergenilor trimite `{allergens: [...]}`; lista goală = „nu conține".
-- Portul botului: `:8086` (`/healthz` și calea webhook-ului; `llm` are deja 8084 în arhitectură).
+- Portul botului: `:9001` (`/healthz` și calea webhook-ului; `llm` are deja 9084 în arhitectură).
 
 ## Securitate
 

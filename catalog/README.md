@@ -34,7 +34,7 @@ Fără NATS: `CATALOG_NATS_URL=` (gol) → doar HTTP; `llm` nu e întrebat, meni
 
 Tot ce trebuie trimis (cereri la `llm`, `food.menu.ready`) se trimite după fiecare eveniment și la fiecare `CATALOG_TICK`, deci dacă brokerul a căzut, se retrimite când revine.
 
-## API (HTTP :8082, intern)
+## API (HTTP :9082, intern)
 
 Erori: `{"error": {"code", "message"}}`, `message` în română.
 
@@ -121,4 +121,4 @@ internal/api/           # HTTP + teste
 
 - **parser**: legat la NATS (ascultă `food.menu.requested`, publică `food.menu.fetched` / `food.menu.error`). `POST /v1/import` rămâne pentru depanare.
 - **llm**: să asculte `food.dish.analyze.requested` / `food.dish.embed.requested` și să răspundă cu `food.dish.analyzed` (doar câmpurile din `need`, `menu_item_id` repetat) și `food.dish.embedded`.
-- **parser**: e pe `:8083` (implicit și în `.env`), deci nu se mai ciocnește cu `catalog`.
+- **parser**: e pe `:9083` (implicit și în `.env`), deci nu se mai ciocnește cu `catalog`.

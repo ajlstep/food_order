@@ -1,0 +1,24 @@
+services:
+  bot:
+    build: .
+    image: food_order/bot
+    container_name: bot
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      BOT_DB_PATH: /data/bot.db
+    ports:
+      - "9001:9001"
+    volumes:
+      - bot-data:/data
+    networks:
+      - food_order
+    restart: unless-stopped
+
+volumes:
+  bot-data:
+
+networks:
+  food_order:
+    external: true

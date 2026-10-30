@@ -64,7 +64,7 @@ func TestParseDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AdminChatID != 42 || cfg.CoreURL != "http://core:8081" || cfg.NATSStream != "FOOD" || cfg.Addr != ":8086" ||
+	if cfg.AdminChatID != 42 || cfg.CoreURL != "http://core:9081" || cfg.NATSStream != "FOOD" || cfg.Addr != ":9001" ||
 		cfg.DBPath != "data/bot.db" || len(cfg.AllowedChats) != 0 {
 		t.Fatalf("unexpected defaults: %+v", cfg)
 	}

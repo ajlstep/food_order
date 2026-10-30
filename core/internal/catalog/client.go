@@ -29,7 +29,7 @@ type Client struct {
 	http *http.Client
 }
 
-// New makes a client. baseURL is like http://catalog:8082.
+// New makes a client. baseURL is like http://catalog:9082.
 func New(baseURL string, hc *http.Client) *Client {
 	return &Client{base: strings.TrimRight(baseURL, "/"), http: hc}
 }

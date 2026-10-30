@@ -19,7 +19,7 @@ Baza `data/core.db` se creează singură; migrările rulează la pornire (`schem
 
 **Stream-ul `FOOD`** (`food.>`) îl creează `core` la pornire — `bot` îl așteaptă. Consumatorul durabil al lui `core` se numește `core`.
 
-## API (HTTP :8081) — apelat de `bot`, cu `X-User-ID`
+## API (HTTP :9081) — apelat de `bot`, cu `X-User-ID`
 
 Fără `X-User-ID` → `400 missing_user`. Erori: `{"error": {"code", "message"}}`; `message` e în română (botul o arată utilizatorului).
 
@@ -116,4 +116,4 @@ Coloane în plus față de schema din notiță (pentru programator): `orders.kit
 ## De făcut în celelalte servicii
 
 - **parser**: ascultă `food.menu.requested`, trimite `food.menu.fetched` (la `catalog`) sau `food.menu.error` (la `core`) cu codurile `no_menu` / `source_unavailable` / `parse_failed` / `bad_request`. README-ul parserului încă pomenește `food.menu.fetch.requested` / `food.menu.empty` — numele corecte sunt cele din notița `Comunicare`.
-- **parser** are implicit portul `:8082`, același cu `catalog`; în notițe parserul e pe `8083`.
+- **parser** are implicit portul `:9082`, același cu `catalog`; în notițe parserul e pe `9083`.

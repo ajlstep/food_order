@@ -92,15 +92,15 @@ func parse(get func(key, def string) string) (Config, error) {
 	var errs []error
 	cfg := Config{
 		TelegramToken: get(EnvTelegramToken, ""),
-		CoreURL:       strings.TrimRight(get(EnvCoreURL, "http://core:8081"), "/"),
-		CatalogURL:    strings.TrimRight(get(EnvCatalogURL, "http://catalog:8082"), "/"),
+		CoreURL:       strings.TrimRight(get(EnvCoreURL, "http://core:9081"), "/"),
+		CatalogURL:    strings.TrimRight(get(EnvCatalogURL, "http://catalog:9082"), "/"),
 		NATSURL:       get(EnvNATSURL, "nats://nats:4222"),
 		NATSToken:     get(EnvNATSToken, ""),
 		NATSUser:      get(EnvNATSUser, ""),
 		NATSPassword:  get(EnvNATSPassword, ""),
 		NATSStream:    get(EnvNATSStream, "FOOD"),
 		NATSDurable:   get(EnvNATSDurable, "bot"),
-		Addr:          get(EnvAddr, ":8086"),
+		Addr:          get(EnvAddr, ":9001"),
 		DBPath:        get(EnvDBPath, "data/bot.db"),
 	}
 

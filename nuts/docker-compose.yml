@@ -8,7 +8,13 @@ services:
       - "8222:8222"   # monitorizare HTTP
     volumes:
       - nats-data:/data
+    networks:
+      - food_order
     restart: unless-stopped
 
 volumes:
   nats-data:
+
+networks:
+  food_order:
+    external: true

@@ -1,0 +1,24 @@
+services:
+  parser:
+    build: .
+    image: food_order/parser
+    container_name: parser
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      PARSER_RAW_DIR: /data/raw
+    ports:
+      - "127.0.0.1:9083:9083"
+    volumes:
+      - parser-data:/data
+    networks:
+      - food_order
+    restart: unless-stopped
+
+volumes:
+  parser-data:
+
+networks:
+  food_order:
+    external: true

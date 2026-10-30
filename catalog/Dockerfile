@@ -11,6 +11,6 @@ COPY --from=build /out/catalog /usr/local/bin/catalog
 USER app
 ENV CATALOG_DB_PATH=/data/catalog.db
 VOLUME /data
-EXPOSE 8082
-HEALTHCHECK --interval=30s --timeout=3s CMD wget -qO- http://127.0.0.1:8082/healthz || exit 1
+EXPOSE 9082
+HEALTHCHECK --interval=30s --timeout=3s CMD wget -qO- http://127.0.0.1:9082/healthz || exit 1
 ENTRYPOINT ["catalog"]

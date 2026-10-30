@@ -4,7 +4,7 @@
 // shared menu, scores the dishes, orchestrates the recommendation
 // (catalog -> score -> llm -> bot) and computes the statistics.
 //
-// HTTP (:8081) for the bot; NATS JetStream for the menu, llm and events.
+// HTTP (:9081) for the bot; NATS JetStream for the menu, llm and events.
 // All settings live in internal/config (see .env.example).
 package main
 

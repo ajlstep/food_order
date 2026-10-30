@@ -1,0 +1,24 @@
+services:
+  core:
+    build: .
+    image: food_order/core
+    container_name: core
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      CORE_DB_PATH: /data/core.db
+    ports:
+      - "127.0.0.1:9081:9081"
+    volumes:
+      - core-data:/data
+    networks:
+      - food_order
+    restart: unless-stopped
+
+volumes:
+  core-data:
+
+networks:
+  food_order:
+    external: true

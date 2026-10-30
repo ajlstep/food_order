@@ -18,7 +18,7 @@ func TestDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Source != "bistro" || cfg.SiteURL != "" || cfg.Addr != ":8083" ||
+	if cfg.Source != "bistro" || cfg.SiteURL != "" || cfg.Addr != ":9083" ||
 		cfg.HTTPTimeout != 30*time.Second || cfg.CacheTTL != 3*time.Hour ||
 		cfg.MinInterval != 10*time.Minute || cfg.RawDir != "data/raw" ||
 		cfg.UserAgent != DefaultUserAgent || cfg.Location.String() != "Europe/Chisinau" {

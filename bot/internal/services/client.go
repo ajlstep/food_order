@@ -97,7 +97,7 @@ func (c client) do(ctx context.Context, userID int64, method, path string, in, o
 // (users.id from the bot database), sent as the X-User-ID header.
 type Core struct{ c client }
 
-// NewCore makes a core client. baseURL is like http://core:8081.
+// NewCore makes a core client. baseURL is like http://core:9081.
 func NewCore(baseURL string, hc *http.Client) *Core {
 	return &Core{client{base: strings.TrimRight(baseURL, "/"), http: hc}}
 }
@@ -158,7 +158,7 @@ func (c *Core) Stats(ctx context.Context, userID int64, from, to string) (contra
 // Catalog is the client of the catalog service (only allergen confirmation).
 type Catalog struct{ c client }
 
-// NewCatalog makes a catalog client. baseURL is like http://catalog:8082.
+// NewCatalog makes a catalog client. baseURL is like http://catalog:9082.
 func NewCatalog(baseURL string, hc *http.Client) *Catalog {
 	return &Catalog{client{base: strings.TrimRight(baseURL, "/"), http: hc}}
 }

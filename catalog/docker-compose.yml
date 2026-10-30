@@ -1,0 +1,24 @@
+services:
+  catalog:
+    build: .
+    image: food_order/catalog
+    container_name: catalog
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      CATALOG_DB_PATH: /data/catalog.db
+    ports:
+      - "127.0.0.1:9082:9082"
+    volumes:
+      - catalog-data:/data
+    networks:
+      - food_order
+    restart: unless-stopped
+
+volumes:
+  catalog-data:
+
+networks:
+  food_order:
+    external: true

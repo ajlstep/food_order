@@ -18,7 +18,7 @@ go mod tidy                      # prima dată (și după ce s-a adăugat nats.g
 go test ./...
 cp .env.example .env             # opțional: toate valorile au implicit; schimbi doar ce ai nevoie
 go run .                         # citește https://bistro.md/ro/catalog?date={date}
-curl "http://localhost:8083/v1/fetch?date=2026-10-28"   # depanare
+curl "http://localhost:9083/v1/fetch?date=2026-10-28"   # depanare
 ```
 
 `{date}` din URL se înlocuiește cu data cerută (`YYYY-MM-DD`). Fără `date` în cerere se ia **mâine** (fusul `PARSER_TZ`).
@@ -47,7 +47,7 @@ Stream-ul îl creează `core`; parserul îl așteaptă (în log: „stream not f
 
 `PARSER_NATS_ENABLED=false` → doar HTTP (nu răspunde nimeni la cererile lui `core`).
 
-## API (HTTP :8083, depanare)
+## API (HTTP :9083, depanare)
 
 | Cerere | Răspuns |
 |---|---|

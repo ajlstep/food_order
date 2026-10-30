@@ -56,7 +56,7 @@ func run(log *slog.Logger, envFile string) error {
 
 	ln, err := net.Listen("tcp", cfg.Addr)
 	if err != nil {
-		return fmt.Errorf("%s=%s is already in use (catalog is on 8082): %w", config.EnvAddr, cfg.Addr, err)
+		return fmt.Errorf("%s=%s is already in use (catalog is on 9082): %w", config.EnvAddr, cfg.Addr, err)
 	}
 	defer ln.Close()
 

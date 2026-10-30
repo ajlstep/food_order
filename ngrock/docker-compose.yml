@@ -31,3 +31,10 @@ services:
     command: start --all --config /etc/ngrok.yml
     ports:
       - "4040:4040"
+    networks:
+      - food_order
+    restart: unless-stopped
+
+networks:
+  food_order:
+    external: true

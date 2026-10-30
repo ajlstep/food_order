@@ -10,5 +10,5 @@ RUN apk add --no-cache ca-certificates && adduser -D app && mkdir /data && chown
 COPY --from=build /out/parser /usr/local/bin/parser
 USER app
 ENV PARSER_RAW_DIR=/data/raw
-EXPOSE 8083
+EXPOSE 9083
 ENTRYPOINT ["parser"]

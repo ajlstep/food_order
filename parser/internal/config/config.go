@@ -87,7 +87,7 @@ const (
 	DefaultSource      = "bistro"
 	DefaultUserAgent   = "food-order-parser/1.0 (personal menu reader)"
 	DefaultHTTPTimeout = 30 * time.Second
-	DefaultAddr        = ":8083" // catalog is on 8082
+	DefaultAddr        = ":9083" // catalog is on 9082
 	DefaultTZ          = "Europe/Chisinau"
 	DefaultCacheTTL    = 3 * time.Hour
 	DefaultMinInterval = 10 * time.Minute

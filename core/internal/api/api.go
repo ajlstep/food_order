@@ -1,4 +1,4 @@
-// Package api is core's HTTP API (port 8081), called by the bot. Every
+// Package api is core's HTTP API (port 9081), called by the bot. Every
 // /v1 call carries the user in the header X-User-ID (users.id from bot.db);
 // without it the answer is 400. Errors: {"error": {"code", "message"}}.
 package api

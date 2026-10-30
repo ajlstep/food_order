@@ -16,7 +16,7 @@ var allowedUpdates = []string{"message", "callback_query"}
 //
 //	webhook: Telegram makes POST https://<your domain>/tg/webhook for every
 //	         message or button press. The bot needs a public https address
-//	         (reverse proxy -> bot:8084). Telegram keeps the updates for up to
+//	         (reverse proxy -> bot:9084). Telegram keeps the updates for up to
 //	         24 h if the bot is down and sends them when it is back.
 //	polling: the bot asks Telegram (getUpdates) in a loop. No public address
 //	         needed; handy for local runs. Starting it removes the webhook.

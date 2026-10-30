@@ -1,4 +1,4 @@
-// Package api is catalog's HTTP API (port 8082), called by core and bot on
+// Package api is catalog's HTTP API (port 9082), called by core and bot on
 // the internal network. Errors: {"error": {"code", "message"}}, the message
 // in Romanian. Only the allergen confirmation needs X-User-ID.
 package api
