@@ -12,11 +12,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
+	"food-order/core/internal/applog"
 	"food-order/core/internal/contracts"
 )
 
@@ -27,11 +30,18 @@ var ErrNotFound = errors.New("catalog: not found")
 type Client struct {
 	base string
 	http *http.Client
+	log  *slog.Logger
 }
 
 // New makes a client. baseURL is like http://catalog:9082.
 func New(baseURL string, hc *http.Client) *Client {
-	return &Client{base: strings.TrimRight(baseURL, "/"), http: hc}
+	return &Client{base: strings.TrimRight(baseURL, "/"), http: hc, log: slog.New(slog.DiscardHandler)}
+}
+
+// WithLog makes the client log every call (debug) and every failure (warn).
+func (c *Client) WithLog(l *slog.Logger) *Client {
+	c.log = l
+	return c
 }
 
 // Menu returns the dishes of a day (GET /v1/menu?date=).
@@ -124,7 +134,18 @@ func decodeDishes(raw json.RawMessage) ([]contracts.CatalogDish, error) {
 	return list, nil
 }
 
-func (c *Client) do(ctx context.Context, method, path string, in, out any) error {
+func (c *Client) do(ctx context.Context, method, path string, in, out any) (err error) {
+	start := time.Now()
+	status := 0
+	size := 0
+	defer func() {
+		args := []any{"method", method, "url", c.base + path, "status", status, "bytes", size, "ms", applog.Since(start)}
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			c.log.WarnContext(ctx, "catalog call failed", append(args, "err", err)...)
+			return
+		}
+		c.log.DebugContext(ctx, "catalog call", append(args, "request", in)...)
+	}()
 	var body io.Reader
 	if in != nil {
 		b, err := json.Marshal(in)
@@ -138,6 +159,9 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 		return err
 	}
 	req.Header.Set("Accept", "application/json")
+	if id := requestID(ctx); id != "" {
+		req.Header.Set("X-Request-ID", id) // catalog logs the same id
+	}
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -146,7 +170,9 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 		return fmt.Errorf("catalog: %w", err)
 	}
 	defer resp.Body.Close()
+	status = resp.StatusCode
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	size = len(raw)
 	if err != nil {
 		return fmt.Errorf("catalog: %w", err)
 	}
@@ -167,4 +193,14 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 		return fmt.Errorf("catalog: %s %s: bad json: %w", method, path, err)
 	}
 	return nil
+}
+
+// requestID is the req_id of the current request, if any.
+func requestID(ctx context.Context) string {
+	for _, a := range applog.Fields(ctx) {
+		if a.Key == "req_id" {
+			return a.Value.String()
+		}
+	}
+	return ""
 }

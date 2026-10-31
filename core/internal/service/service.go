@@ -125,8 +125,11 @@ func (s *Service) period(from, to string, maxDays int) (string, string, error) {
 // publish sends an event and logs a failure; it returns the error.
 func (s *Service) publish(ctx context.Context, subject string, data any) error {
 	err := s.Bus.Publish(ctx, subject, data)
-	if err != nil && !errors.Is(err, bus.ErrOff) {
-		s.Log.Warn("publish failed", "subject", subject, "err", err)
+	switch {
+	case errors.Is(err, bus.ErrOff):
+		s.Log.DebugContext(ctx, "event not sent: no broker", "subject", subject)
+	case err != nil:
+		s.Log.WarnContext(ctx, "publish failed", "subject", subject, "err", err)
 	}
 	return err
 }
@@ -134,6 +137,10 @@ func (s *Service) publish(ctx context.Context, subject string, data any) error {
 // alert sends food.alert to the admin chat (through the bot) and logs it.
 func (s *Service) alert(ctx context.Context, level, format string, args ...any) {
 	text := fmt.Sprintf(format, args...)
-	s.Log.Warn("alert", "level", level, "text", text)
+	if level == "error" {
+		s.Log.ErrorContext(ctx, "alert to the admins", "alert_level", level, "text", text)
+	} else {
+		s.Log.WarnContext(ctx, "alert to the admins", "alert_level", level, "text", text)
+	}
 	_ = s.publish(ctx, contracts.SubjectAlert, contracts.Alert{Service: "core", Level: level, Text: text})
 }

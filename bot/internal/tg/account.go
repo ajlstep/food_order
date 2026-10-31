@@ -19,7 +19,7 @@ func (b *Bot) onStart(ctx context.Context, _ *bot.Bot, u *models.Update) {
 	chat, from, _ := updateChat(u)
 	usr, created, err := b.users.Register(ctx, profileOf(chat, from))
 	if err != nil {
-		b.log.Error("register", "err", err)
+		b.log.ErrorContext(ctx, "register", "err", err)
 		_ = b.sendTo(ctx, chat, "❌ Nu am putut să te conectez. Încearcă din nou puțin mai târziu.", nil)
 		return
 	}
@@ -30,7 +30,8 @@ func (b *Bot) onStart(ctx context.Context, _ *bot.Bot, u *models.Update) {
 	ctx = withSession(ctx, session{user: usr, settings: st})
 
 	if created {
-		b.log.Info("new user", "user_id", usr.ID, "username", usr.Username)
+		b.log.InfoContext(ctx, "new user", "user_id", usr.ID, "username", usr.Username, "first_name", usr.FirstName,
+			"last_name", usr.LastName, "chat_id", usr.ChatID)
 		var markup models.ReplyMarkup
 		if usr.Phone == "" {
 			markup = phoneKeyboard()
@@ -38,6 +39,7 @@ func (b *Bot) onStart(ctx context.Context, _ *bot.Bot, u *models.Update) {
 		b.replyWith(ctx, welcomeText(usr, st), markup)
 		return
 	}
+	b.log.InfoContext(ctx, "user came back", "user_id", usr.ID, "username", usr.Username, "status", usr.Status)
 	b.reply(ctx, welcomeBackText(usr))
 }
 
@@ -47,6 +49,7 @@ func (b *Bot) onStop(ctx context.Context, _ *bot.Bot, _ *models.Update) {
 		b.fail(ctx, "stop", err)
 		return
 	}
+	b.log.InfoContext(ctx, "user stopped the automatic recommendations", "user_id", s.user.ID)
 	b.reply(ctx, stoppedText)
 }
 
@@ -64,6 +67,7 @@ func (b *Bot) onContact(ctx context.Context, u *models.Update) {
 	s := sessionFrom(ctx)
 	c := u.Message.Contact
 	if u.Message.From == nil || c.UserID != u.Message.From.ID {
+		b.log.InfoContext(ctx, "someone else's contact refused", "contact_user_id", c.UserID)
 		b.replyWith(ctx, "Trimite numărul tău cu butonul de jos, nu contactul altcuiva.", phoneKeyboard())
 		return
 	}
@@ -75,6 +79,7 @@ func (b *Bot) onContact(ctx context.Context, u *models.Update) {
 		b.fail(ctx, "set phone", err)
 		return
 	}
+	b.log.InfoContext(ctx, "phone saved", "user_id", s.user.ID, "phone", phone)
 	b.replyWith(ctx, "✅ Am salvat numărul "+esc(phone)+".", removeKeyboard())
 }
 
@@ -90,11 +95,13 @@ func (b *Bot) onSettings(ctx context.Context, _ *bot.Bot, u *models.Update) {
 	word, value, _ := strings.Cut(args, " ")
 	def, err := settings.Find(word)
 	if errors.Is(err, settings.ErrUnknown) {
+		b.log.InfoContext(ctx, "unknown setting", "key", word)
 		b.replyWith(ctx, "Nu știu setarea „"+esc(word)+"”.\n\n"+settingsText(s.settings), settingsKeyboard(s.settings))
 		return
 	}
 	canon, err := def.Parse(value)
 	if err != nil {
+		b.log.InfoContext(ctx, "bad setting value", "key", def.Key, "value", value, "err", err)
 		b.reply(ctx, "❌ "+esc(err.Error())+"\nExemplu: <code>"+esc(def.Help)+"</code>")
 		return
 	}
@@ -102,6 +109,7 @@ func (b *Bot) onSettings(ctx context.Context, _ *bot.Bot, u *models.Update) {
 		b.fail(ctx, "set setting", err)
 		return
 	}
+	b.log.InfoContext(ctx, "setting changed", "user_id", s.user.ID, "key", def.Key, "old", s.settings[def.Key], "new", canon)
 	s.settings[def.Key] = canon
 	b.replyWith(ctx, "✅ "+esc(def.Label)+": <b>"+esc(def.Format(canon))+"</b>\n\n"+settingsText(s.settings), settingsKeyboard(s.settings))
 }
@@ -123,9 +131,10 @@ func (b *Bot) settingsButton(ctx context.Context, api *bot.Bot, q *models.Callba
 	}
 	if err := b.users.SetSetting(ctx, s.user.ID, key, value); err != nil {
 		_, _ = api.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: q.ID, Text: "Nu a mers"})
-		b.log.Error("set setting", "err", err)
+		b.log.ErrorContext(ctx, "set setting", "err", err)
 		return
 	}
+	b.log.InfoContext(ctx, "setting changed", "user_id", s.user.ID, "key", key, "old", s.settings[key], "new", value)
 	s.settings[key] = value
 	_, _ = api.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: q.ID, Text: note})
 
@@ -136,7 +145,7 @@ func (b *Bot) settingsButton(ctx context.Context, api *bot.Bot, q *models.Callba
 			ReplyMarkup: settingsKeyboard(s.settings),
 		})
 		if err != nil {
-			b.log.Warn("edit settings message", "err", err)
+			b.log.WarnContext(ctx, "edit settings message", "err", err)
 		}
 	}
 }

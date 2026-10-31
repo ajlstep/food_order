@@ -58,6 +58,12 @@ type Config struct {
 	// NATSStream is created by core; the parser waits for it.
 	NATSStream  string
 	NATSDurable string
+
+	// AdditionalLogs: also send the detailed debug logs to the logs service
+	// (every request to the site, every dish, every cache decision).
+	AdditionalLogs bool
+	// LogConsole: also print every log to the console.
+	LogConsole bool
 }
 
 // Variable names.
@@ -80,6 +86,9 @@ const (
 	EnvNATSPassword = "PARSER_NATS_PASSWORD"
 	EnvNATSStream   = "PARSER_NATS_STREAM"
 	EnvNATSDurable  = "PARSER_NATS_DURABLE"
+
+	EnvAdditionalLogs = "PARSER_ADDITIONAL_LOGS"
+	EnvLogConsole     = "PARSER_LOG_CONSOLE"
 )
 
 // Defaults.
@@ -135,6 +144,9 @@ func fromLookup(get func(string) string) (Config, error) {
 		NATSPassword: l.str(EnvNATSPassword, ""),
 		NATSStream:   l.str(EnvNATSStream, DefaultNATSStream),
 		NATSDurable:  l.str(EnvNATSDurable, DefaultNATSDurable),
+
+		AdditionalLogs: l.boolean(EnvAdditionalLogs, false),
+		LogConsole:     l.boolean(EnvLogConsole, false),
 	}
 	if cfg.SiteURL != "" {
 		l.checkURL(EnvSiteURL, cfg.SiteURL)

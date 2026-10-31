@@ -4,6 +4,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,8 @@ import (
 	"strconv"
 	"time"
 
+	"food-order/catalog/internal/bus"
+	"food-order/catalog/internal/applog"
 	"food-order/catalog/internal/contracts"
 	"food-order/catalog/internal/service"
 )
@@ -99,6 +102,7 @@ func (a *api) confirmAllergens(w http.ResponseWriter, r *http.Request) {
 	v := r.Header.Get(contracts.HeaderUserID)
 	userID, err := strconv.ParseInt(v, 10, 64)
 	if v == "" || err != nil || userID <= 0 {
+		a.log.WarnContext(logCtx(w), "request without a valid X-User-ID", "value", v)
 		writeError(w, http.StatusBadRequest, "missing_user", "Lipsește antetul X-User-ID (id-ul utilizatorului din bot).")
 		return
 	}
@@ -121,6 +125,7 @@ func (a *api) importMenu(w http.ResponseWriter, r *http.Request) {
 	var in contracts.MenuFetched
 	dec := json.NewDecoder(io.LimitReader(r.Body, 8<<20))
 	if err := dec.Decode(&in); err != nil {
+		a.log.WarnContext(logCtx(w), "import body is not valid JSON", "err", err)
 		writeError(w, http.StatusBadRequest, "bad_json", "Corpul cererii nu e JSON valid (aceeași formă ca data din food.menu.fetched).")
 		return
 	}
@@ -145,12 +150,14 @@ func (a *api) fail(w http.ResponseWriter, err error) bool {
 	if err == nil {
 		return false
 	}
+	ctx := logCtx(w)
 	var se *service.Error
 	if errors.As(err, &se) {
+		a.log.InfoContext(ctx, "request refused", "status", se.Status, "code", se.Code, "message", se.Message)
 		writeError(w, se.Status, se.Code, se.Message)
 		return true
 	}
-	a.log.Error("request failed", "err", err)
+	a.log.ErrorContext(ctx, "request failed", "err", err)
 	writeError(w, http.StatusInternalServerError, "internal", "Eroare internă în catalog.")
 	return true
 }
@@ -158,6 +165,7 @@ func (a *api) fail(w http.ResponseWriter, err error) bool {
 func readJSON(w http.ResponseWriter, r *http.Request, out any) bool {
 	dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
 	if err := dec.Decode(out); err != nil {
+		slog.Default().WarnContext(logCtx(w), "request body is not valid JSON", "err", err)
 		writeError(w, http.StatusBadRequest, "bad_json", "Corpul cererii nu e JSON valid.")
 		return false
 	}
@@ -177,6 +185,9 @@ func writeError(w http.ResponseWriter, status int, code, msg string) {
 type statusWriter struct {
 	http.ResponseWriter
 	status int
+	bytes  int
+	ctx    context.Context // the request context with its log fields
+	log    *slog.Logger
 }
 
 func (s *statusWriter) WriteHeader(code int) {
@@ -184,14 +195,69 @@ func (s *statusWriter) WriteHeader(code int) {
 	s.ResponseWriter.WriteHeader(code)
 }
 
+func (s *statusWriter) Write(b []byte) (int, error) {
+	n, err := s.ResponseWriter.Write(b)
+	s.bytes += n
+	return n, err
+}
+
+// logRequests gives every request an id and its fields in the context
+// (req_id, method, path, user_id), so every log of the request carries
+// them, and logs the request itself: info for every call, warn for a 4xx, error for
+// a 5xx, debug for /healthz. The body is in the debug log.
 func (a *api) logRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
-		next.ServeHTTP(sw, r)
-		if r.URL.Path == "/healthz" {
-			return
+		reqID := r.Header.Get("X-Request-ID")
+		if reqID == "" {
+			reqID = bus.NewID(start)
 		}
-		a.log.Info("http", "method", r.Method, "path", r.URL.Path, "status", sw.status, "ms", time.Since(start).Milliseconds())
+		ctx := applog.With(r.Context(), "req_id", reqID, "http_method", r.Method, "http_path", r.URL.Path)
+		if u := r.Header.Get("X-User-ID"); u != "" {
+			ctx = applog.With(ctx, "user_id", u)
+		}
+		var body []byte
+		if r.Body != nil && r.ContentLength != 0 && a.log.Enabled(ctx, slog.LevelDebug) {
+			body, _ = io.ReadAll(io.LimitReader(r.Body, 1<<20))
+			r.Body = io.NopCloser(bytes.NewReader(body))
+		}
+		r = r.WithContext(ctx)
+		w.Header().Set("X-Request-ID", reqID)
+		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK, ctx: ctx, log: a.log}
+		a.log.DebugContext(ctx, "http request", "query", r.URL.RawQuery, "remote", r.RemoteAddr,
+			"user_agent", r.UserAgent(), "body", bodyForLog(body))
+		next.ServeHTTP(sw, r)
+		args := []any{"status", sw.status, "ms", applog.Since(start), "bytes", sw.bytes, "query", r.URL.RawQuery}
+		switch {
+		case r.URL.Path == "/healthz":
+			a.log.DebugContext(ctx, "http", args...)
+		case sw.status >= 500:
+			a.log.ErrorContext(ctx, "http", args...)
+		case sw.status >= 400:
+			a.log.WarnContext(ctx, "http", args...)
+		default:
+			a.log.InfoContext(ctx, "http", args...)
+		}
 	})
+}
+
+// logCtx is the request context with its log fields (from logRequests).
+func logCtx(w http.ResponseWriter) context.Context {
+	if sw, ok := w.(*statusWriter); ok {
+		return sw.ctx
+	}
+	return context.Background()
+}
+
+func bodyForLog(b []byte) any {
+	if len(b) == 0 {
+		return nil
+	}
+	if len(b) > 8<<10 {
+		return string(b[:8<<10]) + "…"
+	}
+	if json.Valid(b) {
+		return json.RawMessage(b)
+	}
+	return string(b)
 }

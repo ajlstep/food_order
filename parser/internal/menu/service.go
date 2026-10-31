@@ -2,6 +2,7 @@ package menu
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -26,6 +27,9 @@ type Service struct {
 
 	mu      sync.Mutex
 	entries map[string]*entry
+
+	// Log gets the cache decisions (debug) and every real request to the site.
+	Log *slog.Logger
 }
 
 type entry struct {
@@ -36,7 +40,8 @@ type entry struct {
 }
 
 func NewService(f Fetcher, ttl, minInterval time.Duration) *Service {
-	return &Service{fetcher: f, ttl: ttl, minInterval: minInterval, now: time.Now, entries: map[string]*entry{}}
+	return &Service{fetcher: f, ttl: ttl, minInterval: minInterval, now: time.Now, entries: map[string]*entry{},
+		Log: slog.New(slog.DiscardHandler)}
 }
 
 // Get returns the menu for date. Errors: ErrEmpty, *ThrottledError, or the
@@ -55,10 +60,14 @@ func (s *Service) Get(ctx context.Context, date time.Time) (Result, error) {
 
 	e := s.entries[key]
 	if e != nil && e.items != nil && now.Sub(e.fetchedAt) < s.ttl {
+		s.Log.DebugContext(ctx, "menu from the cache", "date", key, "dishes", len(e.items), "age", now.Sub(e.fetchedAt).Round(time.Second))
 		return Result{Date: key, Items: e.items, FetchedAt: e.fetchedAt, Cached: true}, nil
 	}
 	if e != nil && now.Sub(e.lastAttempt) < s.minInterval {
-		return Result{}, &ThrottledError{RetryAfter: s.minInterval - now.Sub(e.lastAttempt), Last: e.lastErr}
+		wait := s.minInterval - now.Sub(e.lastAttempt)
+		s.Log.InfoContext(ctx, "the site was asked for this day not long ago, not asking again", "date", key,
+			"retry_after", wait.Round(time.Second), "last_err", e.lastErr)
+		return Result{}, &ThrottledError{RetryAfter: wait, Last: e.lastErr}
 	}
 	if e == nil {
 		e = &entry{}
@@ -66,13 +75,20 @@ func (s *Service) Get(ctx context.Context, date time.Time) (Result, error) {
 	}
 	e.lastAttempt = now
 
+	s.Log.InfoContext(ctx, "asking the site", "date", key)
 	items, err := s.fetcher.Fetch(ctx, date)
 	if err == nil && len(items) == 0 {
 		err = ErrEmpty
 	}
 	e.lastErr = err
 	if err != nil {
+		s.Log.WarnContext(ctx, "the site gave no menu", "date", key, "err", err, "ms", float64(s.now().Sub(now).Milliseconds()))
 		return Result{}, err
+	}
+	s.Log.InfoContext(ctx, "menu read from the site", "date", key, "dishes", len(items), "ms", float64(s.now().Sub(now).Milliseconds()))
+	for _, it := range items {
+		s.Log.DebugContext(ctx, "dish", "date", key, "name", it.Name, "category", it.Category, "price", it.Price,
+			"weight", it.Weight, "components", it.Components)
 	}
 	e.items, e.fetchedAt = items, now
 	return Result{Date: key, Items: items, FetchedAt: now}, nil

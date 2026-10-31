@@ -5,6 +5,7 @@
 package tg
 
 import (
+	"strconv"
 	"context"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
+	"food-order/bot/internal/applog"
 	"food-order/bot/internal/contracts"
 	"food-order/bot/internal/events"
 	"food-order/bot/internal/services"
@@ -119,7 +121,7 @@ func New(o Options) (*Bot, error) {
 	opts := []bot.Option{
 		bot.WithMiddlewares(b.auth),
 		bot.WithDefaultHandler(b.onText),
-		bot.WithErrorsHandler(func(err error) { b.log.Warn("telegram", "err", err) }),
+		bot.WithErrorsHandler(func(err error) { b.log.Warn("telegram api error", "err", err) }),
 		bot.WithAllowedUpdates(bot.AllowedUpdates(allowedUpdates)),
 	}
 	if o.ServerURL != "" {
@@ -168,7 +170,7 @@ func (b *Bot) setCommands(ctx context.Context) {
 		{Command: "stop", Description: "Opresc recomandările automate"},
 	}})
 	if err != nil {
-		b.log.Warn("set commands", "err", err)
+		b.log.WarnContext(ctx, "set commands", "err", err)
 	}
 }
 
@@ -225,17 +227,26 @@ func (b *Bot) auth(next bot.HandlerFunc) bot.HandlerFunc {
 	return func(ctx context.Context, api *bot.Bot, u *models.Update) {
 		chat, from, private := updateChat(u)
 		if chat == 0 {
+			b.log.DebugContext(ctx, "telegram update without a chat, ignored", "update_id", u.ID)
 			return
 		}
+		start := time.Now()
+		ctx = applog.With(ctx, updateFields(u, chat, from)...)
+		action, details := describeUpdate(u)
+		b.log.DebugContext(ctx, "telegram update", append([]any{"action", action, "private", private}, details...)...)
+		defer func() {
+			b.log.DebugContext(ctx, "telegram update handled", "action", action, "ms", applog.Since(start))
+		}()
 		if !private {
-			b.log.Info("ignored update from a group", "chat_id", chat)
+			b.log.InfoContext(ctx, "ignored update from a group", "chat_id", chat)
 			return
 		}
 		if len(b.allowed) > 0 && !b.allowed[chat] {
-			b.log.Info("ignored update from a chat not in the allowed list", "chat_id", chat)
+			b.log.InfoContext(ctx, "ignored update from a chat not in the allowed list", "chat_id", chat)
 			return
 		}
 		if u.Message != nil && isCommand(u.Message.Text, "start") {
+			b.log.InfoContext(ctx, "user action", append([]any{"action", action}, details...)...)
 			next(ctx, api, u) // onStart registers the user
 			return
 		}
@@ -243,26 +254,30 @@ func (b *Bot) auth(next bot.HandlerFunc) bot.HandlerFunc {
 		usr, err := b.users.UserByChat(ctx, chat)
 		switch {
 		case errors.Is(err, store.ErrNotFound):
+			b.log.InfoContext(ctx, "update from an unregistered chat, asked to /start", "action", action)
 			b.answerCallback(ctx, u, "")
 			b.sendTo(ctx, chat, needStartText, nil)
 			return
 		case err != nil:
-			b.log.Error("user by chat", "err", err)
+			b.log.ErrorContext(ctx, "user by chat", "err", err)
 			b.answerCallback(ctx, u, "Eroare internă")
 			return
 		case usr.Status == store.StatusStopped:
+			b.log.InfoContext(ctx, "update from a stopped user, asked to /start", "user_id", usr.ID, "action", action)
 			b.answerCallback(ctx, u, "")
 			b.sendTo(ctx, chat, stoppedNeedStartText, nil)
 			return
 		}
 		if usr, err = b.users.Touch(ctx, usr, profileOf(chat, from)); err != nil {
-			b.log.Warn("touch user", "err", err)
+			b.log.WarnContext(ctx, "touch user", "err", err)
 		}
 		st, err := b.users.Settings(ctx, usr.ID)
 		if err != nil {
-			b.log.Error("user settings", "err", err)
+			b.log.ErrorContext(ctx, "user settings", "err", err)
 			st = settings.WithDefaults(nil)
 		}
+		ctx = applog.With(ctx, "user_id", usr.ID)
+		b.log.InfoContext(ctx, "user action", append([]any{"action", action}, details...)...)
 		ctx = context.WithValue(ctx, updateKey{}, u)
 		next(withSession(ctx, session{user: usr, settings: st}), api, u)
 	}
@@ -304,17 +319,24 @@ func (b *Bot) sendTo(ctx context.Context, chatID int64, text string, markup mode
 	if markup != nil {
 		p.ReplyMarkup = markup
 	}
-	_, err := b.api.SendMessage(ctx, p)
-	return err
+	start := time.Now()
+	m, err := b.api.SendMessage(ctx, p)
+	if err != nil {
+		b.log.WarnContext(ctx, "telegram message not sent", "to_chat", chatID, "ms", applog.Since(start), "err", err, "text", cutText(text, 300))
+		return err
+	}
+	b.log.DebugContext(ctx, "telegram message sent", "to_chat", chatID, "message_id", m.ID, "chars", len([]rune(text)),
+		"markup", markup != nil, "ms", applog.Since(start), "text", cutText(text, 1000))
+	return nil
 }
 
 // sendUser sends to a user; if the user blocked the bot, it is stopped.
 func (b *Bot) sendUser(ctx context.Context, u store.User, text string, markup models.ReplyMarkup) error {
 	err := b.sendTo(ctx, u.ChatID, text, markup)
 	if errors.Is(err, bot.ErrorForbidden) {
-		b.log.Info("user blocked the bot, stopping it", "user_id", u.ID)
+		b.log.InfoContext(ctx, "user blocked the bot, stopping it", "user_id", u.ID)
 		if serr := b.users.SetStatus(ctx, u.ID, store.StatusStopped); serr != nil {
-			b.log.Warn("set status", "err", serr)
+			b.log.WarnContext(ctx, "set status", "err", serr)
 		}
 		return nil // nothing more to do for this user
 	}
@@ -326,13 +348,20 @@ func (b *Bot) reply(ctx context.Context, text string) { b.replyWith(ctx, text, n
 
 func (b *Bot) replyWith(ctx context.Context, text string, markup models.ReplyMarkup) {
 	if err := b.sendUser(ctx, sessionFrom(ctx).user, text, markup); err != nil {
-		b.log.Error("send", "err", err)
+		b.log.ErrorContext(ctx, "send", "err", err)
 	}
 }
 
 // fail logs the error and tells the user in one line what went wrong.
+// An answer of core/catalog that refuses the action (4xx) is a warning,
+// anything else an error.
 func (b *Bot) fail(ctx context.Context, what string, err error) {
-	b.log.Error(what, "user_id", sessionFrom(ctx).user.ID, "err", err)
+	var apiErr *services.APIError
+	if errors.As(err, &apiErr) && apiErr.Status < 500 {
+		b.log.WarnContext(ctx, what+" refused", "user_id", sessionFrom(ctx).user.ID, "status", apiErr.Status, "code", apiErr.Code, "message", apiErr.Message)
+	} else {
+		b.log.ErrorContext(ctx, what+" failed", "user_id", sessionFrom(ctx).user.ID, "err", err)
+	}
 	b.reply(ctx, "❌ "+userError(err))
 }
 
@@ -386,6 +415,11 @@ func (b *Bot) rememberPicks(userID int64, date string, picks []contracts.Pick) {
 }
 
 func (b *Bot) showRecommendation(ctx context.Context, u store.User, date string, picks []contracts.Pick) error {
+	names := make([]string, 0, len(picks))
+	for _, p := range picks {
+		names = append(names, strconv.FormatInt(p.DishID, 10)+" "+p.Name)
+	}
+	b.log.InfoContext(ctx, "recommendation shown", "user_id", u.ID, "date", date, "picks", len(picks), "dishes", names)
 	if len(picks) == 0 {
 		return b.sendUser(ctx, u, fmt.Sprintf("Pentru %s nu am găsit nimic potrivit în meniu. 😕", esc(humanDate(date))), nil)
 	}
@@ -407,7 +441,7 @@ func (b *Bot) eventUser(ctx context.Context, id int64) (store.User, bool, error)
 		return u, false, err // database problem: retry later
 	}
 	if u.Status != store.StatusActive {
-		b.log.Info("event for a stopped user, skipped", "user_id", id)
+		b.log.InfoContext(ctx, "event for a stopped user, skipped", "user_id", id, "status", u.Status)
 		return u, false, nil
 	}
 	return u, true, nil
@@ -433,6 +467,11 @@ func (b *Bot) RatingRequested(ctx context.Context, r contracts.RatingRequested) 
 		return err
 	}
 	o := b.findOrder(ctx, u.ID, st, r.OrderID) // only for the dish name; nil is fine
+	dish := ""
+	if o != nil {
+		dish = o.DishName
+	}
+	b.log.InfoContext(ctx, "rating question sent", "user_id", u.ID, "order", r.OrderID, "dish", dish)
 	kb := ratingKeyboard(r.OrderID)
 	return b.sendUser(ctx, u, ratingQuestion(o), kb)
 }
@@ -440,23 +479,24 @@ func (b *Bot) RatingRequested(ctx context.Context, r contracts.RatingRequested) 
 // Alert forwards an alert from any service to the admin chat.
 func (b *Bot) Alert(ctx context.Context, a contracts.Alert) error {
 	if b.admin == 0 {
-		b.log.Warn("alert (no admin chat set)", "service", a.Service, "level", a.Level, "text", a.Text, "user_id", a.UserID)
+		b.log.WarnContext(ctx, "alert (no admin chat set)", "service", a.Service, "level", a.Level, "text", a.Text, "user_id", a.UserID)
 		return nil
 	}
+	b.log.InfoContext(ctx, "alert forwarded to the admin chat", "from_service", a.Service, "alert_level", a.Level, "text", a.Text, "alert_user_id", a.UserID)
 	return b.sendTo(ctx, b.admin, alertText(a), nil)
 }
 
 // NotifyUser is used by the scheduler.
 func (b *Bot) NotifyUser(ctx context.Context, u store.User, text string) {
 	if err := b.sendUser(ctx, u, esc(text), nil); err != nil {
-		b.log.Error("notify", "user_id", u.ID, "err", err)
+		b.log.ErrorContext(ctx, "notify", "user_id", u.ID, "err", err)
 	}
 }
 
 func (b *Bot) findOrder(ctx context.Context, userID int64, st settings.Settings, id int64) *contracts.Order {
 	orders, err := b.core.Orders(ctx, userID, b.day(st, -14), b.day(st, 7))
 	if err != nil {
-		b.log.Warn("orders for rating question", "err", err)
+		b.log.WarnContext(ctx, "orders for rating question", "err", err)
 		return nil
 	}
 	for i := range orders {
@@ -465,4 +505,49 @@ func (b *Bot) findOrder(ctx context.Context, userID int64, st settings.Settings,
 		}
 	}
 	return nil
+}
+
+// --- logs ---
+
+// updateFields are the log fields of an update: who and where.
+func updateFields(u *models.Update, chat int64, from *models.User) []any {
+	f := []any{"update_id", u.ID, "req_id", "tg-" + strconv.FormatInt(u.ID, 10), "chat_id", chat}
+	if from != nil {
+		f = append(f, "tg_user_id", from.ID)
+		if from.Username != "" {
+			f = append(f, "username", from.Username)
+		}
+	}
+	return f
+}
+
+// describeUpdate says what the user did: "/meniu", "button order", "text",
+// "contact", and the details for the logs.
+func describeUpdate(u *models.Update) (string, []any) {
+	switch {
+	case u.Message != nil && u.Message.Contact != nil:
+		return "contact", []any{"contact_user_id", u.Message.Contact.UserID}
+	case u.Message != nil && strings.HasPrefix(strings.TrimSpace(u.Message.Text), "/"):
+		cmd, args, _ := strings.Cut(strings.TrimSpace(u.Message.Text), " ")
+		cmd, _, _ = strings.Cut(cmd, "@")
+		return cmd, []any{"args", strings.TrimSpace(args), "message_id", u.Message.ID}
+	case u.Message != nil:
+		return "text", []any{"text", cutText(u.Message.Text, 500), "message_id", u.Message.ID}
+	case u.CallbackQuery != nil:
+		d := []any{"callback_data", u.CallbackQuery.Data}
+		if cb, err := decodeCallback(u.CallbackQuery.Data); err == nil {
+			d = append(d, "button", cb)
+			return "button " + cb.Kind, d
+		}
+		return "button", d
+	}
+	return "other", nil
+}
+
+func cutText(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }

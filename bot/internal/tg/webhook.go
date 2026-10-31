@@ -40,10 +40,10 @@ func (b *Bot) registerWebhook(ctx context.Context, publicURL, secret string) {
 			MaxConnections: 5,
 		})
 		if err == nil {
-			b.log.Info("webhook registered", "url", publicURL)
+			b.log.InfoContext(ctx, "webhook registered", "url", publicURL)
 			return
 		}
-		b.log.Error("set webhook failed, retrying", "err", err, "in", wait)
+		b.log.ErrorContext(ctx, "set webhook failed, retrying", "err", err, "in", wait)
 		select {
 		case <-ctx.Done():
 			return
@@ -59,7 +59,7 @@ func (b *Bot) registerWebhook(ctx context.Context, publicURL, secret string) {
 // set) and asks for updates in a loop until ctx is cancelled.
 func (b *Bot) RunPolling(ctx context.Context) {
 	if _, err := b.api.DeleteWebhook(ctx, &bot.DeleteWebhookParams{}); err != nil {
-		b.log.Warn("delete webhook", "err", err)
+		b.log.WarnContext(ctx, "delete webhook", "err", err)
 	}
 	b.setCommands(ctx)
 	b.api.Start(ctx)
@@ -78,7 +78,7 @@ func (b *Bot) WebhookHandler(secret string) http.Handler {
 		}
 		got := []byte(r.Header.Get("X-Telegram-Bot-Api-Secret-Token"))
 		if subtle.ConstantTimeCompare(got, want) != 1 {
-			b.log.Warn("webhook: wrong secret token", "remote", r.RemoteAddr)
+			b.log.WarnContext(r.Context(), "webhook: wrong secret token", "remote", r.RemoteAddr)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}

@@ -20,6 +20,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"food-order/parser/internal/applog"
 	"food-order/parser/internal/contracts"
 )
 
@@ -109,9 +110,14 @@ func (b *Bus) Publish(ctx context.Context, subject string, data any) error {
 	}
 	pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	if _, err := b.js.Publish(pctx, subject, raw, jetstream.WithMsgID(env.ID)); err != nil {
+	start := time.Now()
+	ack, err := b.js.Publish(pctx, subject, raw, jetstream.WithMsgID(env.ID))
+	if err != nil {
+		b.log.WarnContext(ctx, "event publish failed", "subject", subject, "event_id", env.ID, "bytes", len(raw), "ms", applog.Since(start), "err", err)
 		return fmt.Errorf("bus: publish %s: %w", subject, err)
 	}
+	b.log.DebugContext(ctx, "event published", "subject", subject, "event_id", env.ID, "bytes", len(raw),
+		"stream_seq", ack.Sequence, "duplicate", ack.Duplicate, "ms", applog.Since(start), "data", json.RawMessage(env.Data))
 	return nil
 }
 
@@ -181,12 +187,16 @@ func (b *Bus) Consume(ctx context.Context, subjects []string, h Handler, onReady
 	cc, err := cons.Consume(func(msg jetstream.Msg) {
 		hctx, cancel := context.WithTimeout(ctx, 50*time.Second)
 		defer cancel()
+		hctx = eventContext(hctx, msg)
+		start := time.Now()
+		b.log.DebugContext(hctx, "event received", "bytes", len(msg.Data()), "data", rawOrText(msg.Data()))
 		err := h(hctx, msg.Subject(), msg.Data())
 		switch {
 		case err == nil:
+			b.log.DebugContext(hctx, "event handled", "ms", applog.Since(start))
 			_ = msg.Ack()
 		case errors.Is(err, ErrPermanent):
-			b.log.Error("dropping event", "subject", msg.Subject(), "err", err)
+			b.log.ErrorContext(hctx, "dropping event", "err", err, "ms", applog.Since(start), "data", rawOrText(msg.Data()))
 			_ = msg.Term()
 		default:
 			n := uint64(0)
@@ -194,14 +204,14 @@ func (b *Bus) Consume(ctx context.Context, subjects []string, h Handler, onReady
 				n = md.NumDelivered
 			}
 			if int(n) >= ccfg.MaxDeliver {
-				b.log.Error("event failed on its last delivery", "subject", msg.Subject(), "attempt", n, "err", err)
+				b.log.ErrorContext(hctx, "event failed on its last delivery", "attempt", n, "err", err, "data", rawOrText(msg.Data()))
 				if onGiveUp != nil {
 					onGiveUp(msg.Subject(), err)
 				}
 				_ = msg.Term()
 				return
 			}
-			b.log.Warn("event failed, it will be redelivered", "subject", msg.Subject(), "attempt", n, "err", err)
+			b.log.WarnContext(hctx, "event failed, it will be redelivered", "attempt", n, "err", err, "ms", applog.Since(start))
 			_ = msg.Nak() // the consumer BackOff decides the pause
 		}
 	})
@@ -215,6 +225,32 @@ func (b *Bus) Consume(ctx context.Context, subjects []string, h Handler, onReady
 	}
 	<-ctx.Done()
 	return nil
+}
+
+// eventContext attaches the event to ctx, so every log of its handling
+// says which event it was about.
+func eventContext(ctx context.Context, msg jetstream.Msg) context.Context {
+	var env struct {
+		ID   string `json:"id"`
+		Type string `json:"type"`
+	}
+	_ = json.Unmarshal(msg.Data(), &env)
+	args := []any{"subject", msg.Subject(), "event_id", env.ID}
+	if md, err := msg.Metadata(); err == nil {
+		args = append(args, "stream_seq", md.Sequence.Stream, "delivery", md.NumDelivered, "pending", md.NumPending)
+	}
+	return applog.With(ctx, args...)
+}
+
+// rawOrText keeps valid JSON as JSON in the log, anything else as text.
+func rawOrText(b []byte) any {
+	if len(b) > 16<<10 {
+		return string(b[:16<<10]) + "…"
+	}
+	if json.Valid(b) {
+		return json.RawMessage(b)
+	}
+	return string(b)
 }
 
 // ---------------------------------------------------------------- ids

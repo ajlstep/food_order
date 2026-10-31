@@ -28,6 +28,7 @@ func (b *Bot) onMenu(ctx context.Context, _ *bot.Bot, _ *models.Update) {
 		b.fail(ctx, "request recommendation", err)
 		return
 	}
+	b.log.InfoContext(ctx, "recommendation requested by the user", "user_id", s.user.ID, "date", date)
 	b.reply(ctx, fmt.Sprintf("⏳ Am cerut recomandarea pentru %s. Îți scriu când e gata.", esc(humanDate(date))))
 }
 
@@ -49,7 +50,7 @@ func (b *Bot) onChoose(ctx context.Context, _ *bot.Bot, u *models.Update) {
 	switch r.Status {
 	case "", "ready":
 		if err := b.showRecommendation(ctx, s.user, date, r.Picks); err != nil {
-			b.log.Error("send recommendation", "err", err)
+			b.log.ErrorContext(ctx, "send recommendation", "err", err)
 		}
 	case "waiting_menu":
 		b.reply(ctx, "⏳ Încă aștept meniul de la bucătărie. Îți scriu când e gata.")
@@ -115,6 +116,7 @@ func (b *Bot) onPrefs(ctx context.Context, _ *bot.Bot, u *models.Update) {
 	}
 	next, changed, err := applyPrefsCommand(cur, commandArgs(u))
 	if errors.Is(err, errPrefsUsage) {
+		b.log.InfoContext(ctx, "prefs command not understood", "args", commandArgs(u))
 		b.reply(ctx, "Nu am înțeles.\n\n"+prefsHelp)
 		return
 	}
@@ -123,6 +125,7 @@ func (b *Bot) onPrefs(ctx context.Context, _ *bot.Bot, u *models.Update) {
 			b.fail(ctx, "set prefs", err)
 			return
 		}
+		b.log.InfoContext(ctx, "prefs changed", "user_id", s.user.ID, "before", len(cur.Items), "after", len(next.Items), "items", next.Items)
 		// read back, so the numbers in the list are the ones core has now
 		if fresh, err := b.core.Prefs(ctx, s.user.ID); err == nil {
 			next = fresh
@@ -177,6 +180,7 @@ func (b *Bot) onText(ctx context.Context, _ *bot.Bot, u *models.Update) {
 			return
 		}
 	}
+	b.log.DebugContext(ctx, "text not understood, help sent", "text", cutText(text, 200))
 	b.reply(ctx, helpText)
 }
 
@@ -197,5 +201,6 @@ func (b *Bot) submitRating(ctx context.Context, orderID int64, rating int, comme
 		b.fail(ctx, "rate", err)
 		return
 	}
+	b.log.InfoContext(ctx, "rating saved", "user_id", s.user.ID, "order", orderID, "rating", rating, "comment", comment)
 	b.reply(ctx, fmt.Sprintf("✅ Am salvat nota %d⭐. Mulțumesc!", rating))
 }

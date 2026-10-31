@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"food-order/parser/internal/api"
+	"food-order/parser/internal/applog"
 	"food-order/parser/internal/bistro"
 	"food-order/parser/internal/bus"
 	"food-order/parser/internal/config"
@@ -33,26 +34,39 @@ import (
 
 func main() {
 	envFile := flag.String("env", ".env", "path of the .env file (optional)")
+	debug := flag.Bool("debug", false, "send the detailed logs too (same as PARSER_ADDITIONAL_LOGS=true)")
 	flag.Parse()
 
-	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	if err := run(log, *envFile); err != nil {
-		log.Error("parser stopped", "err", err)
+	cfg, err := config.Load(*envFile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "parser:", err) // no logger yet: the config says where logs go
 		os.Exit(1)
 	}
+	logURL := cfg.NATSURL
+	if !cfg.NATSEnabled {
+		logURL = "" // no broker: the logs go to the console
+	}
+	al := applog.New(applog.Options{
+		Service: "parser", URL: logURL, Token: cfg.NATSToken, User: cfg.NATSUser, Password: cfg.NATSPassword,
+		Additional: cfg.AdditionalLogs || *debug, Console: cfg.LogConsole,
+	})
+	slog.SetDefault(al.Logger)
+	if err := run(al.Logger, cfg); err != nil {
+		al.Fatal("parser stopped", "err", err)
+		os.Exit(1)
+	}
+	al.Info("parser stopped")
+	al.Close()
 }
 
-func run(log *slog.Logger, envFile string) error {
-	cfg, err := config.Load(envFile)
-	if err != nil {
-		return err
-	}
+func run(log *slog.Logger, cfg config.Config) error {
 	fetcher, err := newFetcher(cfg, log)
 	if err != nil {
 		return err
 	}
 	// one Service for HTTP and NATS: the same cache and the same pause between requests to the site
 	svc := menu.NewService(fetcher, cfg.CacheTTL, cfg.MinInterval)
+	svc.Log = log
 
 	ln, err := net.Listen("tcp", cfg.Addr)
 	if err != nil {
@@ -102,7 +116,9 @@ func run(log *slog.Logger, envFile string) error {
 			errc <- err
 		}
 	}()
-	log.Info("parser listening", "addr", cfg.Addr, "source", cfg.Source, "nats", cfg.NATSEnabled, "nats_url", cfg.NATSURL)
+	log.Info("parser listening", "addr", cfg.Addr, "source", cfg.Source, "nats", cfg.NATSEnabled, "nats_url", cfg.NATSURL,
+		"site_url", cfg.SiteURL, "cache_ttl", cfg.CacheTTL, "min_interval", cfg.MinInterval,
+		"additional_logs", cfg.AdditionalLogs, "log_console", cfg.LogConsole)
 
 	select {
 	case err = <-errc:

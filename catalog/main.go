@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"food-order/catalog/internal/api"
+	"food-order/catalog/internal/applog"
 	"food-order/catalog/internal/bus"
 	"food-order/catalog/internal/config"
 	"food-order/catalog/internal/contracts"
@@ -34,25 +35,28 @@ import (
 
 func main() {
 	envFile := flag.String("env", ".env", "path of the .env file (optional)")
-	debug := flag.Bool("debug", false, "log at debug level")
+	debug := flag.Bool("debug", false, "send the detailed logs too (same as CATALOG_ADDITIONAL_LOGS=true)")
 	flag.Parse()
 
-	level := slog.LevelInfo
-	if *debug {
-		level = slog.LevelDebug
-	}
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
-	if err := run(log, *envFile); err != nil {
-		log.Error("catalog stopped", "err", err)
+	cfg, err := config.Load(*envFile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "catalog:", err) // no logger yet: the config says where logs go
 		os.Exit(1)
 	}
+	al := applog.New(applog.Options{
+		Service: "catalog", URL: cfg.NATSURL, Token: cfg.NATSToken, User: cfg.NATSUser, Password: cfg.NATSPassword,
+		Additional: cfg.AdditionalLogs || *debug, Console: cfg.LogConsole,
+	})
+	slog.SetDefault(al.Logger)
+	if err := run(al.Logger, cfg); err != nil {
+		al.Fatal("catalog stopped", "err", err)
+		os.Exit(1)
+	}
+	al.Info("catalog stopped")
+	al.Close()
 }
 
-func run(log *slog.Logger, envFile string) error {
-	cfg, err := config.Load(envFile)
-	if err != nil {
-		return err
-	}
+func run(log *slog.Logger, cfg config.Config) error {
 
 	// the port first: if it is taken, stop before touching the database or the broker
 	ln, err := net.Listen("tcp", cfg.Addr)
@@ -138,7 +142,7 @@ func run(log *slog.Logger, envFile string) error {
 	}()
 	log.Info("catalog started", "addr", cfg.Addr, "db", cfg.DBPath, "nats", cfg.NATSURL,
 		"analysis", cfg.AnalysisEnabled, "embeddings", cfg.EmbedEnabled, "analysis_timeout", cfg.AnalysisTimeout.String(),
-		"import", cfg.ImportEnabled)
+		"import", cfg.ImportEnabled, "additional_logs", cfg.AdditionalLogs, "log_console", cfg.LogConsole, "tick", cfg.Tick)
 
 	select {
 	case err = <-errc:

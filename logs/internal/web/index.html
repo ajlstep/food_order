@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="ro">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Loguri · food order</title>
+<style>
+:root{--bg:#f7f7f5;--panel:#fff;--text:#1d1d1b;--muted:#6b6b66;--line:#e3e3de;--accent:#2f6fdb;
+--info:#2f6fdb;--warn:#b7791f;--error:#c53030;--debug:#6b6b66;--other:#7b4fc9}
+@media (prefers-color-scheme:dark){:root{--bg:#161616;--panel:#1f1f1f;--text:#e8e8e4;--muted:#9a9a93;--line:#333330;--accent:#6aa0ff;
+--info:#6aa0ff;--warn:#e0a53a;--error:#f26b6b;--debug:#9a9a93;--other:#b794f4}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,sans-serif}
+header{padding:12px 16px;display:flex;flex-wrap:wrap;gap:10px;align-items:center;border-bottom:1px solid var(--line);background:var(--panel);position:sticky;top:0;z-index:2}
+h1{font-size:16px;margin:0 8px 0 0}
+input,select,button{font:inherit;color:inherit;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:5px 8px}
+input[type=search]{min-width:180px;flex:1 1 180px}
+button{cursor:pointer}button:hover{border-color:var(--accent)}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.chip{display:inline-flex;gap:5px;align-items:center;padding:3px 9px;border:1px solid var(--line);border-radius:99px;cursor:pointer;user-select:none;background:var(--bg)}
+.chip.on{border-color:currentColor;font-weight:600}
+.chip small{color:var(--muted);font-weight:400}
+main{padding:12px 16px}
+table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+th,td{text-align:left;padding:6px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:12px;color:var(--muted);font-weight:600;background:var(--bg)}
+td.ts{white-space:nowrap;font-variant-numeric:tabular-nums;color:var(--muted)}
+td.msg{white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,monospace;font-size:13px}
+tr.row{cursor:pointer}tr.row:hover{background:color-mix(in srgb,var(--accent) 6%,transparent)}
+tr.detail td{background:var(--bg);font-family:ui-monospace,monospace;font-size:12px;white-space:pre-wrap;word-break:break-all;color:var(--muted)}
+.badge{display:inline-block;padding:1px 8px;border-radius:99px;font-size:12px;font-weight:600;color:#fff;background:var(--other)}
+.badge.info{background:var(--info)}.badge.warn{background:var(--warn)}.badge.error{background:var(--error)}.badge.debug{background:var(--debug)}
+.chip.info{color:var(--info)}.chip.warn{color:var(--warn)}.chip.error{color:var(--error)}.chip.debug{color:var(--debug)}.chip.other{color:var(--other)}
+.empty{padding:30px;text-align:center;color:var(--muted)}
+.foot{display:flex;justify-content:space-between;align-items:center;margin-top:10px;color:var(--muted)}
+label.live{display:inline-flex;gap:5px;align-items:center;color:var(--muted)}
+@media (max-width:700px){th.sub,td.sub,th.svc,td.svc{display:none}}
+</style>
+</head>
+<body>
+<header>
+  <h1>Loguri</h1>
+  <div class="chips" id="levels"></div>
+  <select id="service"><option value="">toate serviciile</option></select>
+  <input type="search" id="q" placeholder="caută în text…">
+  <label>de la <input type="datetime-local" id="from"></label>
+  <label>până la <input type="datetime-local" id="to"></label>
+  <label class="live"><input type="checkbox" id="live" checked> live</label>
+  <button id="reset">Resetează</button>
+</header>
+<main>
+  <table>
+    <thead><tr><th>Data</th><th>Tip</th><th class="svc">Serviciu</th><th>Text</th><th class="sub">Subiect</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div class="empty" id="empty" hidden>Niciun log.</div>
+  <div class="foot"><span id="count"></span><button id="more" hidden>Încarcă mai multe</button></div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const PAGE = 100;
+let selected = new Set();   // levels turned on (empty = all)
+let items = [];             // entries on screen, newest first
+let timer = null, busy = false;
+
+const fmt = new Intl.DateTimeFormat('ro-RO', {dateStyle:'short', timeStyle:'medium'});
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+const cssLevel = l => ['info','warn','error','debug'].includes(l) ? l : 'other';
+const iso = v => v ? new Date(v).toISOString() : '';
+
+function params(extra) {
+  const p = new URLSearchParams();
+  if (selected.size) p.set('level', [...selected].join(','));
+  if ($('service').value) p.set('service', $('service').value);
+  if ($('q').value.trim()) p.set('q', $('q').value.trim());
+  if ($('from').value) p.set('from', iso($('from').value));
+  if ($('to').value) p.set('to', iso($('to').value));
+  for (const [k, v] of Object.entries(extra || {})) p.set(k, v);
+  return p;
+}
+async function api(path, p) {
+  const r = await fetch(path + (p ? '?' + p : ''), {cache:'no-store'});
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+async function loadMeta() {
+  const m = await api('/api/meta');
+  const box = $('levels');
+  box.replaceChildren();
+  for (const l of Object.keys(m.levels).sort()) {
+    const c = el('span', 'chip ' + cssLevel(l) + (selected.has(l) ? ' on' : ''), l);
+    c.append(el('small', null, m.levels[l]));
+    c.onclick = () => { selected.has(l) ? selected.delete(l) : selected.add(l); loadMeta(); reload(); };
+    box.append(c);
+  }
+  const sel = $('service'), cur = sel.value;
+  sel.replaceChildren(new Option('toate serviciile', ''), ...m.services.map(s => new Option(s, s)));
+  sel.value = cur;
+}
+
+function render() {
+  const body = $('rows');
+  body.replaceChildren();
+  for (const e of items) {
+    const tr = el('tr', 'row');
+    const ts = el('td', 'ts', fmt.format(new Date(e.ts)));
+    ts.title = e.ts;
+    const lv = el('td'); lv.append(el('span', 'badge ' + cssLevel(e.level), e.level));
+    tr.append(ts, lv, el('td', 'svc', e.service), el('td', 'msg', e.message), el('td', 'sub', e.subject));
+    let detail = null;
+    tr.onclick = () => {
+      if (detail) { detail.remove(); detail = null; return; }
+      detail = el('tr', 'detail');
+      const td = el('td'); td.colSpan = 5;
+      td.textContent = 'id ' + e.id + ' · primit ' + e.received + ' · ' + e.subject + (e.fields ? '\n' + JSON.stringify(JSON.parse(e.fields), null, 2) : '');
+      detail.append(td); tr.after(detail);
+    };
+    body.append(tr);
+  }
+  $('empty').hidden = items.length > 0;
+  $('count').textContent = items.length + ' afișate';
+}
+
+async function reload() {
+  const d = await api('/api/logs', params({limit: PAGE}));
+  items = d.items;
+  render();
+  $('more').hidden = d.items.length < PAGE;
+}
+async function more() {
+  if (!items.length) return;
+  const d = await api('/api/logs', params({limit: PAGE, before: Math.min(...items.map(e => e.id))}));
+  items = items.concat(d.items);
+  render();
+  $('more').hidden = d.items.length < PAGE;
+}
+// live: new entries since the highest id we have (only when sorted by arrival, i.e. no upper time bound)
+async function poll() {
+  if (busy || !$('live').checked || $('to').value) return;
+  busy = true;
+  try {
+    const top = items.length ? Math.max(...items.map(e => e.id)) : 0;
+    const d = await api('/api/logs', params({limit: 500, after: top}));
+    if (d.items.length) {
+      items = d.items.concat(items);
+      items.sort((a, b) => a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : b.id - a.id);
+      render(); loadMeta();
+    }
+  } catch (e) { /* the next tick tries again */ }
+  busy = false;
+}
+
+let deb;
+const later = () => { clearTimeout(deb); deb = setTimeout(reload, 250); };
+$('q').oninput = later;
+$('service').onchange = reload;
+$('from').onchange = $('to').onchange = reload;
+$('more').onclick = more;
+$('reset').onclick = () => { selected.clear(); $('q').value = $('service').value = $('from').value = $('to').value = ''; loadMeta(); reload(); };
+setInterval(poll, 3000);
+loadMeta().then(reload).catch(e => { $('empty').hidden = false; $('empty').textContent = 'Eroare: ' + e.message; });
+</script>
+</body>
+</html>

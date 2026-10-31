@@ -29,8 +29,10 @@ func (s *Service) CreateOrder(ctx context.Context, userID int64, req contracts.C
 		return contracts.Order{}, badRequest("bad_price", "Prețul nu poate fi negativ.")
 	}
 
+	s.Log.DebugContext(ctx, "order requested", "user_id", userID, "date", req.Date, "dish_id", req.DishID, "price", req.Price, "forced", req.Forced)
 	snap, price, err := s.snapshot(ctx, userID, req.DishID, req.Date)
 	if err != nil {
+		s.Log.WarnContext(ctx, "order not saved: no snapshot of the dish", "user_id", userID, "date", req.Date, "dish_id", req.DishID, "err", err)
 		return contracts.Order{}, err
 	}
 	if req.Price != nil {
@@ -40,13 +42,15 @@ func (s *Service) CreateOrder(ctx context.Context, userID int64, req contracts.C
 		UserID: userID, Date: req.Date, DishID: req.DishID, Price: price, Forced: req.Forced, Snapshot: snap,
 	}, s.Now())
 	if errors.Is(err, store.ErrRated) {
+		s.Log.InfoContext(ctx, "order refused: the meal of the day is already rated", "user_id", userID, "date", req.Date, "dish_id", req.DishID)
 		return contracts.Order{}, &Error{Status: http.StatusConflict, Code: "already_rated",
 			Message: "Masa din ziua asta e deja notată, alegerea nu se mai poate schimba."}
 	}
 	if err != nil {
 		return contracts.Order{}, err
 	}
-	s.Log.Info("order saved", "order", o.ID, "user_id", userID, "date", o.Date, "dish_id", o.DishID, "forced", o.Forced)
+	s.Log.InfoContext(ctx, "order saved", "order", o.ID, "user_id", userID, "date", o.Date, "dish_id", o.DishID, "dish", o.DishName,
+		"price", o.Price, "forced", o.Forced, "nutrition_source", o.NutritionSource, "kcal_min", o.KcalMin, "kcal_max", o.KcalMax)
 	return orderView(o), nil
 }
 
@@ -55,14 +59,19 @@ func (s *Service) snapshot(ctx context.Context, userID, dishID int64, date strin
 	if catErr == nil {
 		for _, d := range dishes {
 			if d.ID == dishID {
+				s.Log.DebugContext(ctx, "snapshot from catalog", "dish_id", dishID, "dish", d.Name, "nutrition_source", d.NutritionSource)
 				return snapshotOf(d), d.Price, nil
 			}
 		}
+		s.Log.DebugContext(ctx, "catalog does not have the dish in the menu of the day", "dish_id", dishID, "date", date, "got", len(dishes))
+	} else {
+		s.Log.WarnContext(ctx, "catalog did not answer for the snapshot, trying the recommendation", "dish_id", dishID, "date", date, "err", catErr)
 	}
 	// fallback: what we saved when we recommended it
 	if rec, err := s.Store.LatestRec(ctx, userID, date); err == nil {
 		for _, c := range rec.Candidates {
 			if c.DishID == dishID {
+				s.Log.InfoContext(ctx, "snapshot taken from the saved recommendation", "dish_id", dishID, "rec", rec.ID, "dish", c.Name)
 				return store.Snapshot{
 					DishName: c.Name, PortionG: c.PortionG, KcalMin: c.KcalMin, KcalMax: c.KcalMax,
 					ProteinGMin: c.ProteinGMin, ProteinGMax: c.ProteinGMax, FatGMin: c.FatGMin, FatGMax: c.FatGMax,
@@ -72,7 +81,7 @@ func (s *Service) snapshot(ctx context.Context, userID, dishID int64, date strin
 		}
 	}
 	if catErr != nil && !errors.Is(catErr, catalog.ErrNotFound) {
-		s.Log.Warn("catalog for snapshot", "dish_id", dishID, "err", catErr)
+		s.Log.WarnContext(ctx, "catalog for snapshot", "dish_id", dishID, "err", catErr)
 		return store.Snapshot{}, nil, &Error{Status: http.StatusServiceUnavailable, Code: "catalog_unavailable",
 			Message: "Catalogul nu răspunde acum. Încearcă puțin mai târziu."}
 	}
@@ -129,11 +138,14 @@ func (s *Service) Rate(ctx context.Context, userID, orderID int64, req contracts
 	comment := cut(strings.TrimSpace(req.Comment), 2000)
 	o, err := s.Store.Rate(ctx, userID, orderID, req.Rating, comment, s.Now())
 	if errors.Is(err, store.ErrNotFound) {
+		s.Log.InfoContext(ctx, "rating for an unknown order", "user_id", userID, "order", orderID)
 		return contracts.Order{}, notFound("not_found", "Nu am găsit comanda asta.")
 	}
 	if err != nil {
 		return contracts.Order{}, err
 	}
+	s.Log.InfoContext(ctx, "order rated", "user_id", userID, "order", o.ID, "date", o.Date, "dish_id", o.DishID, "dish", o.DishName,
+		"rating", req.Rating, "comment", comment, "llm_parse", comment != "" && s.Cfg.LLMEnabled)
 	if comment != "" && s.Cfg.LLMEnabled {
 		_ = s.publish(ctx, contracts.SubjectFeedbackParseRequested,
 			contracts.FeedbackParseRequested{OrderID: o.ID, Rating: req.Rating, Comment: comment})
@@ -145,8 +157,11 @@ func (s *Service) Rate(ctx context.Context, userID, orderID int64, req contracts
 func (s *Service) OnFeedbackParsed(ctx context.Context, ev contracts.FeedbackParsed) error {
 	err := s.Store.SetLabels(ctx, ev.OrderID, ev.Labels, cut(strings.TrimSpace(ev.KitchenFeedback), 1000), s.Now())
 	if errors.Is(err, store.ErrNotFound) {
-		s.Log.Warn("labels for an unknown order", "order", ev.OrderID)
+		s.Log.WarnContext(ctx, "labels for an unknown order", "order", ev.OrderID)
 		return nil
+	}
+	if err == nil {
+		s.Log.InfoContext(ctx, "feedback labels saved", "order", ev.OrderID, "labels", ev.Labels, "kitchen_feedback", ev.KitchenFeedback)
 	}
 	return err
 }
@@ -165,6 +180,7 @@ func (s *Service) Orders(ctx context.Context, userID int64, from, to string) ([]
 	for _, o := range orders {
 		out = append(out, orderView(o))
 	}
+	s.Log.DebugContext(ctx, "orders read", "user_id", userID, "from", from, "to", to, "count", len(out))
 	return out, nil
 }
 
@@ -190,6 +206,7 @@ func (s *Service) Prefs(ctx context.Context, userID int64) (contracts.Prefs, err
 	if err != nil {
 		return contracts.Prefs{}, err
 	}
+	s.Log.DebugContext(ctx, "prefs read", "user_id", userID, "count", len(ps))
 	return contracts.Prefs{Items: prefsView(ps)}, nil
 }
 
@@ -227,6 +244,7 @@ func (s *Service) SetPrefs(ctx context.Context, userID int64, in contracts.Prefs
 	if err := s.Store.ReplacePrefs(ctx, userID, items); err != nil {
 		return contracts.Prefs{}, err
 	}
+	s.Log.InfoContext(ctx, "prefs saved", "user_id", userID, "count", len(items), "sent", len(in.Items), "items", items)
 	return s.Prefs(ctx, userID)
 }
 
@@ -374,6 +392,8 @@ func (s *Service) Stats(ctx context.Context, userID int64, from, to string) (con
 	if len(st.TopDishes) > 10 {
 		st.TopDishes = st.TopDishes[:10]
 	}
+	s.Log.DebugContext(ctx, "stats computed", "user_id", userID, "from", from, "to", to, "orders", st.Orders,
+		"rated", st.Rated, "spent", st.Spent, "without_nutrition", st.WithoutNutrition)
 	return st, nil
 }
 

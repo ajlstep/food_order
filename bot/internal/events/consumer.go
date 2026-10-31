@@ -2,6 +2,7 @@ package events
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"food-order/bot/internal/applog"
 	"food-order/bot/internal/contracts"
 )
 
@@ -114,20 +116,54 @@ func waitConsumer(ctx context.Context, js jetstream.JetStream, cfg ConsumerConfi
 func handleMsg(ctx context.Context, h *Handler, msg jetstream.Msg, log *slog.Logger) {
 	hctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+	hctx = eventContext(hctx, msg)
+	start := time.Now()
+	log.DebugContext(hctx, "event received", "bytes", len(msg.Data()), "data", rawOrText(msg.Data()))
 
 	err := h.Handle(hctx, msg.Data())
 	switch {
 	case err == nil:
+		log.DebugContext(hctx, "event handled", "ms", applog.Since(start))
 		_ = msg.Ack()
 	case errors.Is(err, ErrPermanent):
-		log.Error("dropping event", "subject", msg.Subject(), "err", err)
+		log.ErrorContext(hctx, "dropping event", "err", err, "ms", applog.Since(start), "data", rawOrText(msg.Data()))
 		_ = msg.Term()
 	default:
 		n := uint64(0)
 		if md, mdErr := msg.Metadata(); mdErr == nil {
 			n = md.NumDelivered
 		}
-		log.Warn("event failed, it will be redelivered", "subject", msg.Subject(), "attempt", n, "err", err)
+		if int(n) >= len(backoff)+1 {
+			log.ErrorContext(hctx, "event failed on its last delivery", "attempt", n, "err", err, "data", rawOrText(msg.Data()))
+		} else {
+			log.WarnContext(hctx, "event failed, it will be redelivered", "attempt", n, "err", err, "ms", applog.Since(start))
+		}
 		_ = msg.Nak() // the consumer BackOff decides the pause
 	}
+}
+
+// eventContext attaches the event to ctx, so every log of its handling
+// says which event it was about.
+func eventContext(ctx context.Context, msg jetstream.Msg) context.Context {
+	var env struct {
+		ID   string `json:"id"`
+		Type string `json:"type"`
+	}
+	_ = json.Unmarshal(msg.Data(), &env)
+	args := []any{"subject", msg.Subject(), "event_id", env.ID}
+	if md, err := msg.Metadata(); err == nil {
+		args = append(args, "stream_seq", md.Sequence.Stream, "delivery", md.NumDelivered, "pending", md.NumPending)
+	}
+	return applog.With(ctx, args...)
+}
+
+// rawOrText keeps valid JSON as JSON in the log, anything else as text.
+func rawOrText(b []byte) any {
+	if len(b) > 16<<10 {
+		return string(b[:16<<10]) + "…"
+	}
+	if json.Valid(b) {
+		return json.RawMessage(b)
+	}
+	return string(b)
 }

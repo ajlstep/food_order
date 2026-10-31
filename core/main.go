@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"time"
 
 	"food-order/core/internal/api"
+	"food-order/core/internal/applog"
 	"food-order/core/internal/bus"
 	"food-order/core/internal/catalog"
 	"food-order/core/internal/config"
@@ -32,25 +34,29 @@ import (
 
 func main() {
 	envFile := flag.String("env", ".env", "path of the .env file (optional)")
-	debug := flag.Bool("debug", false, "log at debug level (e.g. why dishes were excluded)")
+	debug := flag.Bool("debug", false, "send the detailed logs too (same as CORE_ADDITIONAL_LOGS=true)")
 	flag.Parse()
 
-	level := slog.LevelInfo
-	if *debug {
-		level = slog.LevelDebug
-	}
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
-	if err := run(log, *envFile); err != nil {
-		log.Error("core stopped", "err", err)
+	cfg, err := config.Load(*envFile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "core:", err) // no logger yet: the config says where logs go
 		os.Exit(1)
 	}
+	al := applog.New(applog.Options{
+		Service: "core", URL: cfg.NATSURL, Token: cfg.NATSToken, User: cfg.NATSUser, Password: cfg.NATSPassword,
+		Additional: cfg.AdditionalLogs || *debug, Console: cfg.LogConsole,
+	})
+	slog.SetDefault(al.Logger)
+	if err := run(al.Logger, cfg); err != nil {
+		al.Fatal("core stopped", "err", err)
+		os.Exit(1)
+	}
+	al.Info("core stopped")
+	al.Close()
 }
 
-func run(log *slog.Logger, envFile string) error {
-	cfg, err := config.Load(envFile)
-	if err != nil {
-		return err
-	}
+func run(log *slog.Logger, cfg config.Config) error {
+	var err error
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -77,7 +83,7 @@ func run(log *slog.Logger, envFile string) error {
 		log.Warn("CORE_NATS_URL is empty: no broker; menu requests and llm are off, picks come from the score")
 	}
 
-	svc := service.New(db, catalog.New(cfg.CatalogURL, &http.Client{Timeout: cfg.HTTPTimeout}), pub, cfg, log)
+	svc := service.New(db, catalog.New(cfg.CatalogURL, &http.Client{Timeout: cfg.HTTPTimeout}).WithLog(log), pub, cfg, log)
 	errc := make(chan error, 2)
 
 	if b != nil {
@@ -117,7 +123,8 @@ func run(log *slog.Logger, envFile string) error {
 		}
 	}()
 	log.Info("core started", "addr", cfg.Addr, "db", cfg.DBPath, "catalog", cfg.CatalogURL, "nats", cfg.NATSURL,
-		"menu_request_time", cfg.MenuRequestTime.String(), "llm", cfg.LLMEnabled, "tz", cfg.Location.String())
+		"menu_request_time", cfg.MenuRequestTime.String(), "llm", cfg.LLMEnabled, "tz", cfg.Location.String(),
+		"additional_logs", cfg.AdditionalLogs, "log_console", cfg.LogConsole, "tick", cfg.Tick)
 
 	select {
 	case err = <-errc:

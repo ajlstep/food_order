@@ -23,7 +23,7 @@ func (b *Bot) onButton(ctx context.Context, api *bot.Bot, u *models.Update) {
 	}
 	cb, err := decodeCallback(q.Data)
 	if err != nil {
-		b.log.Warn("button", "err", err)
+		b.log.WarnContext(ctx, "unknown button", "data", q.Data, "err", err)
 		answer("Buton necunoscut")
 		return
 	}
@@ -45,6 +45,7 @@ func (b *Bot) onButton(ctx context.Context, api *bot.Bot, u *models.Update) {
 
 	case kindOrder:
 		if cb.Date < b.day(s.settings, 0) {
+			b.log.InfoContext(ctx, "order button of a past day", "date", cb.Date, "dish_id", cb.DishID)
 			answer("Recomandarea a expirat")
 			clear()
 			b.reply(ctx, "Recomandarea asta e pentru o zi trecută. Trimite /alege pentru cea de acum.")
@@ -58,6 +59,8 @@ func (b *Bot) onButton(ctx context.Context, api *bot.Bot, u *models.Update) {
 			b.fail(ctx, "create order", err)
 			return
 		}
+		b.log.InfoContext(ctx, "dish chosen", "order", o.ID, "date", cb.Date, "dish_id", cb.DishID, "dish", o.DishName,
+			"price", cb.Price, "forced", cb.Forced)
 		answer("Salvat")
 		clear()
 		name := o.DishName
@@ -75,18 +78,20 @@ func (b *Bot) onButton(ctx context.Context, api *bot.Bot, u *models.Update) {
 		if msg == nil || msg.ReplyMarkup == nil {
 			return
 		}
+		b.log.DebugContext(ctx, "forced toggle", "date", cb.Date, "forced", cb.Forced)
 		kb := toggleForced(*msg.ReplyMarkup, cb.Date, cb.Forced)
 		_, err := api.EditMessageReplyMarkup(ctx, &bot.EditMessageReplyMarkupParams{
 			ChatID: msg.Chat.ID, MessageID: msg.ID, ReplyMarkup: kb,
 		})
 		if err != nil {
-			b.log.Warn("edit keyboard", "err", err)
+			b.log.WarnContext(ctx, "edit keyboard", "err", err)
 		}
 
 	case kindRate:
 		b.mu.Lock()
 		b.pending[s.user.ID] = &pendingRating{orderID: cb.OrderID, rating: cb.Rating, until: b.now().Add(commentWait)}
 		b.mu.Unlock()
+		b.log.InfoContext(ctx, "stars given, waiting for a comment", "order", cb.OrderID, "rating", cb.Rating, "wait", commentWait)
 		answer(fmt.Sprintf("%d⭐", cb.Rating))
 		clear()
 		b.replyWith(ctx, fmt.Sprintf("Ai dat %d⭐. Scrie un comentariu (ce a fost bun sau rău) sau apasă butonul:", cb.Rating),
@@ -95,6 +100,7 @@ func (b *Bot) onButton(ctx context.Context, api *bot.Bot, u *models.Update) {
 	case kindNoNote:
 		p := b.takePending(s.user.ID)
 		if p == nil || p.orderID != cb.OrderID {
+			b.log.InfoContext(ctx, "no-comment button for an expired rating", "order", cb.OrderID)
 			answer("Nota a expirat, trimite /nota")
 			clear()
 			return
@@ -106,6 +112,7 @@ func (b *Bot) onButton(ctx context.Context, api *bot.Bot, u *models.Update) {
 	case kindAllergen:
 		pick, ok := b.findPick(ctx, s.user.ID, cb.Date, cb.DishID)
 		if !ok {
+			b.log.InfoContext(ctx, "allergen button for a dish no longer known", "date", cb.Date, "dish_id", cb.DishID)
 			answer("Nu mai găsesc felul, trimite /alege")
 			return
 		}
@@ -118,6 +125,7 @@ func (b *Bot) onButton(ctx context.Context, api *bot.Bot, u *models.Update) {
 			b.fail(ctx, "confirm allergens", err)
 			return
 		}
+		b.log.InfoContext(ctx, "allergens confirmed", "dish_id", cb.DishID, "dish", pick.Name, "contains", cb.Yes, "allergens", allergens)
 		if cb.Yes {
 			answer("Salvat: conține " + strings.Join(allergens, ", "))
 		} else {

@@ -33,6 +33,9 @@ const (
 	EnvImportEnabled   = "CATALOG_IMPORT_ENABLED"
 	EnvProcessedKeep   = "CATALOG_PROCESSED_KEEP"
 	EnvTick            = "CATALOG_TICK"
+
+	EnvAdditionalLogs = "CATALOG_ADDITIONAL_LOGS"
+	EnvLogConsole     = "CATALOG_LOG_CONSOLE"
 )
 
 // Config is the complete configuration of catalog.
@@ -54,6 +57,10 @@ type Config struct {
 	ImportEnabled   bool          // POST /v1/import (debugging: a menu without the broker)
 	ProcessedKeep   time.Duration // how long processed event ids are kept
 	Tick            time.Duration // how often catalog looks around (timeouts, failed publishes)
+
+	// Logs go to NATS (logs.<level>), to the logs service.
+	AdditionalLogs bool // also send the detailed debug logs (every call, every dish, every event)
+	LogConsole     bool // also print the logs to the console
 }
 
 // Load reads the .env file (if it exists) and the environment.
@@ -103,6 +110,9 @@ func FromLookup(get func(string) (string, bool)) (Config, error) {
 		ImportEnabled:   l.boolean(EnvImportEnabled, true),
 		ProcessedKeep:   l.duration(EnvProcessedKeep, 30*24*time.Hour),
 		Tick:            l.duration(EnvTick, 30*time.Second),
+
+		AdditionalLogs: l.boolean(EnvAdditionalLogs, false),
+		LogConsole:     l.boolean(EnvLogConsole, false),
 	}
 	if cfg.NATSToken != "" && cfg.NATSUser != "" {
 		l.fail(EnvNATSToken, "set either %s or %s/%s, not both", EnvNATSToken, EnvNATSUser, EnvNATSPassword)

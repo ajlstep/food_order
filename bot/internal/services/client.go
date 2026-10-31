@@ -3,6 +3,8 @@
 package services
 
 import (
+	"time"
+	"log/slog"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -14,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 
+	"food-order/bot/internal/applog"
 	"food-order/bot/internal/contracts"
 )
 
@@ -42,10 +45,28 @@ func (e *APIError) Is(target error) bool {
 type client struct {
 	base string
 	http *http.Client
+	name string // core / catalog, for the logs
+	log  *slog.Logger
 }
 
 // do makes one JSON call. userID > 0 adds the X-User-ID header.
-func (c client) do(ctx context.Context, userID int64, method, path string, in, out any) error {
+// Every call is logged at debug (url, status, time, body); a failure at warn.
+func (c client) do(ctx context.Context, userID int64, method, path string, in, out any) (err error) {
+	start := time.Now()
+	status, size := 0, 0
+	var respBody []byte
+	defer func() {
+		lg := c.log
+		if lg == nil {
+			lg = slog.Default()
+		}
+		args := []any{"service_called", c.name, "method", method, "url", c.base + path, "status", status, "bytes", size, "ms", applog.Since(start)}
+		if err != nil {
+			lg.WarnContext(ctx, c.name+" call failed", append(args, "err", err, "request", in)...)
+			return
+		}
+		lg.DebugContext(ctx, c.name+" call", append(args, "request", in, "response", bodyForLog(respBody))...)
+	}()
 	var body io.Reader
 	if in != nil {
 		b, err := json.Marshal(in)
@@ -59,6 +80,11 @@ func (c client) do(ctx context.Context, userID int64, method, path string, in, o
 		return err
 	}
 	req.Header.Set("Accept", "application/json")
+	for _, a := range applog.Fields(ctx) {
+		if a.Key == "req_id" { // the other service logs the same id
+			req.Header.Set("X-Request-ID", a.Value.String())
+		}
+	}
 	if userID > 0 {
 		req.Header.Set(contracts.HeaderUserID, strconv.FormatInt(userID, 10))
 	}
@@ -70,10 +96,12 @@ func (c client) do(ctx context.Context, userID int64, method, path string, in, o
 		return err
 	}
 	defer resp.Body.Close()
+	status = resp.StatusCode
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return err
 	}
+	size, respBody = len(raw), raw
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		apiErr := &APIError{Status: resp.StatusCode}
 		var eb contracts.ErrorBody
@@ -99,7 +127,13 @@ type Core struct{ c client }
 
 // NewCore makes a core client. baseURL is like http://core:9081.
 func NewCore(baseURL string, hc *http.Client) *Core {
-	return &Core{client{base: strings.TrimRight(baseURL, "/"), http: hc}}
+	return &Core{client{base: strings.TrimRight(baseURL, "/"), http: hc, name: "core"}}
+}
+
+// WithLog sets the logger of the calls.
+func (c *Core) WithLog(l *slog.Logger) *Core {
+	c.c.log = l
+	return c
 }
 
 // RequestRecommendation asks for the recommendation of a day (POST, 202).
@@ -160,7 +194,13 @@ type Catalog struct{ c client }
 
 // NewCatalog makes a catalog client. baseURL is like http://catalog:9082.
 func NewCatalog(baseURL string, hc *http.Client) *Catalog {
-	return &Catalog{client{base: strings.TrimRight(baseURL, "/"), http: hc}}
+	return &Catalog{client{base: strings.TrimRight(baseURL, "/"), http: hc, name: "catalog"}}
+}
+
+// WithLog sets the logger of the calls.
+func (c *Catalog) WithLog(l *slog.Logger) *Catalog {
+	c.c.log = l
+	return c
 }
 
 // ConfirmAllergens saves a user's confirmation of the dish allergens
@@ -172,4 +212,17 @@ func (c *Catalog) ConfirmAllergens(ctx context.Context, userID, dishID int64, al
 	}
 	return c.c.do(ctx, userID, http.MethodPost, "/v1/dishes/"+strconv.FormatInt(dishID, 10)+"/allergens/confirm",
 		contracts.ConfirmAllergensRequest{Allergens: allergens}, nil)
+}
+
+func bodyForLog(b []byte) any {
+	if len(b) == 0 {
+		return nil
+	}
+	if len(b) > 8<<10 {
+		return string(b[:8<<10]) + "…"
+	}
+	if json.Valid(b) {
+		return json.RawMessage(b)
+	}
+	return string(b)
 }

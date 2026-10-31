@@ -58,6 +58,9 @@ const (
 	EnvScoreTargetMode = "CORE_SCORE_TARGET_MODE"
 
 	EnvTick = "CORE_TICK"
+
+	EnvAdditionalLogs = "CORE_ADDITIONAL_LOGS"
+	EnvLogConsole     = "CORE_LOG_CONSOLE"
 )
 
 // Weights of the score parts (the same for everybody; the data is per user).
@@ -126,6 +129,10 @@ type Config struct {
 	Score                Score
 
 	Tick time.Duration // how often the scheduler looks around
+
+	// Logs go to NATS (logs.<level>), to the logs service.
+	AdditionalLogs bool // also send the detailed debug logs (every call, every step)
+	LogConsole     bool // also print the logs to the console
 }
 
 // Clock is a time of day (HH:MM).
@@ -218,6 +225,9 @@ func FromLookup(get func(string) (string, bool)) (Config, error) {
 		},
 
 		Tick: l.duration(EnvTick, 30*time.Second),
+
+		AdditionalLogs: l.boolean(EnvAdditionalLogs, false),
+		LogConsole:     l.boolean(EnvLogConsole, false),
 	}
 	if cfg.RecPicks > cfg.RecCandidates {
 		l.fail(EnvRecPicks, "must not be larger than %s (%d)", EnvRecCandidates, cfg.RecCandidates)

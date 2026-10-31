@@ -26,13 +26,19 @@ func (s *Service) menuReady(ctx context.Context, date string) (bool, error) {
 func (s *Service) ensureMenu(ctx context.Context, date string, onDemand bool) error {
 	ready, err := s.menuReady(ctx, date)
 	if err != nil || ready {
+		if ready {
+			s.Log.DebugContext(ctx, "menu already ready", "date", date)
+		}
 		return err
 	}
 	m, err := s.Store.LatestMenuFor(ctx, date)
 	switch {
 	case err == nil && m.Active():
+		s.Log.DebugContext(ctx, "menu already being asked for", "date", date, "request_id", m.RequestID, "status", m.Status, "attempts", m.Attempts)
 		return nil
 	case err == nil && !onDemand:
+		s.Log.DebugContext(ctx, "menu request finished without a menu; the schedule does not ask again", "date", date,
+			"request_id", m.RequestID, "status", m.Status, "error_code", m.ErrorCode)
 		return nil
 	case err != nil && !errors.Is(err, store.ErrNotFound):
 		return err
@@ -45,7 +51,7 @@ func (s *Service) ensureMenu(ctx context.Context, date string, onDemand bool) er
 	if err := s.Store.CreateMenuRequest(ctx, m, now); err != nil {
 		return err
 	}
-	s.Log.Info("menu requested", "request_id", m.RequestID, "date", date, "on_demand", onDemand)
+	s.Log.InfoContext(ctx, "menu requested", "request_id", m.RequestID, "date", date, "on_demand", onDemand)
 	// if this fails the request expires after CORE_MENU_TIMEOUT and is resent
 	_ = s.publish(ctx, contracts.SubjectMenuRequested, contracts.MenuRequested{RequestID: m.RequestID, From: date, To: date})
 	return nil
@@ -62,7 +68,7 @@ func (s *Service) resendMenu(ctx context.Context, m store.MenuRequest) error {
 	if err := s.Store.UpdateMenuRequest(ctx, m, now); err != nil {
 		return err
 	}
-	s.Log.Info("menu requested again", "request_id", m.RequestID, "date", m.DateFrom, "attempt", m.Attempts)
+	s.Log.InfoContext(ctx, "menu requested again", "request_id", m.RequestID, "date", m.DateFrom, "attempt", m.Attempts)
 	_ = s.publish(ctx, contracts.SubjectMenuRequested, contracts.MenuRequested{RequestID: m.RequestID, From: m.DateFrom, To: m.DateTo})
 	return nil
 }
@@ -103,7 +109,7 @@ func (s *Service) OnMenuReady(ctx context.Context, ev contracts.MenuReady) error
 	if err != nil {
 		return err
 	}
-	s.Log.Info("menu ready", "request_id", ev.RequestID, "from", ev.From, "to", ev.To, "dishes", len(ev.DishIDs))
+	s.Log.InfoContext(ctx, "menu ready", "request_id", ev.RequestID, "from", ev.From, "to", ev.To, "dishes", len(ev.DishIDs))
 
 	for _, d := range dates {
 		waiting, err := s.Store.RecsWaitingFor(ctx, d)
@@ -112,10 +118,12 @@ func (s *Service) OnMenuReady(ctx context.Context, ev contracts.MenuReady) error
 		}
 		for _, rec := range waiting {
 			if err := s.generate(ctx, rec); err != nil {
-				s.Log.Warn("generate after menu ready", "rec", rec.ID, "err", err) // the scheduler tries again
+				s.Log.WarnContext(ctx, "generate after menu ready", "rec", rec.ID, "err", err) // the scheduler tries again
 			}
 		}
+		s.Log.DebugContext(ctx, "recommendations waiting for this menu", "date", d, "count", len(waiting), "revision", revision[d])
 		if revision[d] && s.Cfg.RegenerateOnRevision {
+			s.Log.InfoContext(ctx, "new menu revision, regenerating recommendations", "date", d)
 			s.regenerate(ctx, d)
 		}
 	}
@@ -127,12 +135,13 @@ func (s *Service) OnMenuReady(ctx context.Context, ev contracts.MenuReady) error
 func (s *Service) regenerate(ctx context.Context, date string) {
 	recs, err := s.Store.LatestReadyRecsFor(ctx, date)
 	if err != nil {
-		s.Log.Warn("regenerate", "date", date, "err", err)
+		s.Log.WarnContext(ctx, "regenerate", "date", date, "err", err)
 		return
 	}
 	for _, old := range recs {
 		chose, err := s.Store.HasOrder(ctx, old.UserID, date)
 		if err != nil || chose {
+			s.Log.DebugContext(ctx, "regenerate skipped", "user_id", old.UserID, "date", date, "already_chose", chose, "err", err)
 			continue
 		}
 		rec, err := s.Store.CreateRec(ctx, old.UserID, date, bus.NewID(s.Now()), s.Now())
@@ -140,7 +149,7 @@ func (s *Service) regenerate(ctx context.Context, date string) {
 			err = s.generate(ctx, rec)
 		}
 		if err != nil {
-			s.Log.Warn("regenerate", "user_id", old.UserID, "date", date, "err", err)
+			s.Log.WarnContext(ctx, "regenerate", "user_id", old.UserID, "date", date, "err", err)
 		}
 	}
 }
@@ -149,15 +158,18 @@ func (s *Service) regenerate(ctx context.Context, date string) {
 func (s *Service) OnMenuError(ctx context.Context, ev contracts.MenuError) error {
 	m, err := s.Store.MenuRequestByID(ctx, ev.RequestID)
 	if errors.Is(err, store.ErrNotFound) {
-		s.Log.Warn("menu error for an unknown request", "request_id", ev.RequestID, "code", ev.Code)
+		s.Log.WarnContext(ctx, "menu error for an unknown request", "request_id", ev.RequestID, "code", ev.Code)
 		return nil
 	}
 	if err != nil {
 		return err
 	}
 	if m.Status == store.MenuReady {
+		s.Log.DebugContext(ctx, "late menu error ignored, the menu is ready", "request_id", ev.RequestID, "code", ev.Code)
 		return nil // a late error after the menu came
 	}
+	s.Log.WarnContext(ctx, "menu source answered with an error", "request_id", ev.RequestID, "date", m.DateFrom,
+		"code", ev.Code, "message", ev.Message, "attempts", m.Attempts)
 	return s.menuFailed(ctx, m, ev.Code, ev.Message, store.MenuError)
 }
 
@@ -205,7 +217,7 @@ func (s *Service) menuFailed(ctx context.Context, m store.MenuRequest, code, msg
 		m.Alerted = true
 		s.alert(ctx, "error", "Cererea de meniu pentru %s a fost respinsă (%s): %s. Probabil un bug.", m.DateFrom, code, msg)
 	}
-	s.Log.Info("menu error", "request_id", m.RequestID, "date", m.DateFrom, "code", code, "attempts", m.Attempts, "next_retry", m.NextRetryAt)
+	s.Log.InfoContext(ctx, "menu error", "request_id", m.RequestID, "date", m.DateFrom, "code", code, "attempts", m.Attempts, "next_retry", m.NextRetryAt)
 	return s.Store.UpdateMenuRequest(ctx, m, now)
 }
 

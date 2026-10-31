@@ -102,7 +102,7 @@ func (b *Bot) collectStats(ctx context.Context, members []store.Member, from, to
 			defer cancel()
 			rows[i].stats, rows[i].err = b.core.Stats(cctx, rows[i].member.User.ID, rows[i].from, to)
 			if rows[i].err != nil {
-				b.log.Warn("member stats", "user_id", rows[i].member.User.ID, "err", rows[i].err)
+				b.log.WarnContext(ctx, "member stats", "user_id", rows[i].member.User.ID, "err", rows[i].err)
 			}
 		}(i)
 	}

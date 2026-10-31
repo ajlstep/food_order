@@ -125,6 +125,7 @@ func (b *Bot) groupCreate(ctx context.Context, name string) {
 		return
 	}
 	g, err := b.users.CreateGroup(ctx, s.user.ID, name)
+	b.log.InfoContext(ctx, "create group", "name", name, "group_id", g.ID, "err", err)
 	switch {
 	case errors.Is(err, store.ErrBadGroupName):
 		b.reply(ctx, "Denumirea trebuie să aibă 2–64 de caractere. Exemplu: <code>/grup nou Endava Chișinău</code>")
@@ -172,6 +173,7 @@ func (b *Bot) groupInvite(ctx context.Context, g store.Group, query string) {
 		b.fail(ctx, "create invite", err)
 		return
 	}
+	b.log.InfoContext(ctx, "group invite created", "group_id", g.ID, "invite_id", inv.ID, "target_user_id", target.ID, "query", query)
 	if err := b.sendUser(ctx, target, inviteText(s.user, g), inviteKeyboard(inv.ID)); err != nil {
 		b.fail(ctx, "send invite", err)
 		return
@@ -213,6 +215,7 @@ func (b *Bot) groupKickByQuery(ctx context.Context, g store.Group, query string)
 func (b *Bot) groupKick(ctx context.Context, g store.Group, target store.User) {
 	s := sessionFrom(ctx)
 	_, err := b.users.RemoveMember(ctx, g.ID, s.user.ID, target.ID)
+	b.log.InfoContext(ctx, "remove group member", "group_id", g.ID, "target_user_id", target.ID, "err", err)
 	switch {
 	case errors.Is(err, store.ErrCannotRemoveOwner):
 		b.reply(ctx, "Pe tine nu te poți scoate. Ca să ieși: /grup iesi")
@@ -238,6 +241,7 @@ func (b *Bot) groupButton(ctx context.Context, _ *models.CallbackQuery, cb Callb
 	switch cb.Kind {
 	case kindInvite:
 		inv, g, err := b.users.AnswerInvite(ctx, cb.ID, s.user.ID, cb.Yes)
+		b.log.InfoContext(ctx, "group invite answered", "invite_id", cb.ID, "accept", cb.Yes, "group_id", g.ID, "status", inv.Status, "err", err)
 		switch {
 		case errors.Is(err, store.ErrInviteGone):
 			answer("Invitația nu mai e valabilă")
@@ -288,6 +292,7 @@ func (b *Bot) groupButton(ctx context.Context, _ *models.CallbackQuery, cb Callb
 			return
 		}
 		res, err := b.users.LeaveGroup(ctx, s.user.ID)
+		b.log.InfoContext(ctx, "leave group", "group_id", res.Group.ID, "deleted", res.Deleted, "new_owner", res.NewOwner != nil, "err", err)
 		if err != nil {
 			answer("Nu a mers")
 			b.fail(ctx, "leave group", err)
@@ -319,7 +324,7 @@ func (b *Bot) editKeyboard(ctx context.Context, kb models.InlineKeyboardMarkup) 
 	if _, err := b.api.EditMessageReplyMarkup(ctx, &bot.EditMessageReplyMarkupParams{
 		ChatID: m.Chat.ID, MessageID: m.ID, ReplyMarkup: kb,
 	}); err != nil {
-		b.log.Warn("edit keyboard", "err", err)
+		b.log.WarnContext(ctx, "edit keyboard", "err", err)
 	}
 }
 
@@ -329,13 +334,13 @@ type updateKey struct{}
 func (b *Bot) notifyUserID(ctx context.Context, userID int64, text string) {
 	u, err := b.users.UserByID(ctx, userID)
 	if err != nil {
-		b.log.Warn("notify: user", "user_id", userID, "err", err)
+		b.log.WarnContext(ctx, "notify: user", "user_id", userID, "err", err)
 		return
 	}
 	if u.Status != store.StatusActive {
 		return
 	}
 	if err := b.sendUser(ctx, u, text, nil); err != nil {
-		b.log.Warn("notify", "user_id", userID, "err", err)
+		b.log.WarnContext(ctx, "notify", "user_id", userID, "err", err)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"food-order/core/internal/applog"
 	"food-order/core/internal/bus"
 	"food-order/core/internal/contracts"
 	"food-order/core/internal/store"
@@ -27,14 +28,21 @@ func (s *Service) Tick(ctx context.Context) {
 		{"rating questions", s.askRatings},
 		{"forget old events", s.forgetEvents},
 	}
+	tickStart := time.Now()
+	ctx = applog.With(ctx, "job", "scheduler", "tick_id", bus.NewID(tickStart))
 	for _, st := range steps {
 		if ctx.Err() != nil {
 			return
 		}
-		if err := st.fn(ctx); err != nil {
-			s.Log.Error("scheduler", "step", st.name, "err", err)
+		sctx := applog.With(ctx, "step", st.name)
+		start := time.Now()
+		if err := st.fn(sctx); err != nil {
+			s.Log.ErrorContext(sctx, "scheduler step failed", "err", err, "ms", applog.Since(start))
+			continue
 		}
+		s.Log.DebugContext(sctx, "scheduler step done", "ms", applog.Since(start))
 	}
+	s.Log.DebugContext(ctx, "scheduler tick done", "steps", len(steps), "ms", applog.Since(tickStart))
 }
 
 // dailyMenu: from CORE_MENU_REQUEST_TIME on, ask once for the menu of the
@@ -46,8 +54,10 @@ func (s *Service) dailyMenu(ctx context.Context) error {
 	}
 	target := s.nextServingDay()
 	if target == "" {
+		s.Log.DebugContext(ctx, "daily menu: no serving day in the next week", "menu_days", s.Cfg.MenuDays)
 		return nil
 	}
+	s.Log.DebugContext(ctx, "daily menu: checking", "date", target, "request_time", s.Cfg.MenuRequestTime.String())
 	return s.ensureMenu(ctx, target, false)
 }
 
@@ -59,6 +69,8 @@ func (s *Service) expireMenus(ctx context.Context) error {
 		return err
 	}
 	for _, m := range old {
+		s.Log.WarnContext(ctx, "menu request expired without an answer", "request_id", m.RequestID, "date", m.DateFrom,
+			"attempts", m.Attempts, "requested_at", m.RequestedAt, "timeout", s.Cfg.MenuTimeout)
 		msg := "niciun răspuns în " + s.Cfg.MenuTimeout.String()
 		if err := s.menuFailed(ctx, m, contracts.MenuErrSourceUnavailable, msg, store.MenuExpired); err != nil {
 			return err
@@ -88,16 +100,21 @@ func (s *Service) sweepWaiting(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if len(recs) > 0 {
+		s.Log.DebugContext(ctx, "recommendations waiting for a menu", "count", len(recs))
+	}
 	for _, rec := range recs {
 		ready, err := s.menuReady(ctx, rec.Date)
 		if err != nil {
 			return err
 		}
 		if !ready {
+			s.Log.DebugContext(ctx, "still no menu for the waiting recommendation", "rec", rec.ID, "user_id", rec.UserID, "date", rec.Date)
 			continue
 		}
+		s.Log.InfoContext(ctx, "menu is ready, generating a waiting recommendation", "rec", rec.ID, "user_id", rec.UserID, "date", rec.Date)
 		if err := s.generate(ctx, rec); err != nil {
-			s.Log.Warn("generate (retry)", "rec", rec.ID, "err", err)
+			s.Log.WarnContext(ctx, "generate (retry)", "rec", rec.ID, "user_id", rec.UserID, "date", rec.Date, "err", err)
 		}
 	}
 	return nil
@@ -111,7 +128,7 @@ func (s *Service) llmTimeouts(ctx context.Context) error {
 		return err
 	}
 	for _, rec := range recs {
-		s.Log.Warn("llm did not answer in time, picks from the score", "rec", rec.ID, "request_id", rec.RequestID)
+		s.Log.WarnContext(ctx, "llm did not answer in time, picks from the score", "rec", rec.ID, "request_id", rec.RequestID)
 		if err := s.finish(ctx, rec.ID, s.scorePicks(rec.Candidates)); err != nil {
 			return err
 		}
@@ -130,6 +147,7 @@ func (s *Service) republish(ctx context.Context) error {
 		return err
 	}
 	for _, rec := range recs {
+		s.Log.InfoContext(ctx, "sending a recommendation the bot never got", "rec", rec.ID, "user_id", rec.UserID, "date", rec.Date)
 		if err := s.notify(ctx, rec.ID); err != nil {
 			return err
 		}
@@ -149,7 +167,11 @@ func (s *Service) askRatings(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if len(orders) > 0 {
+		s.Log.InfoContext(ctx, "asking for ratings", "orders", len(orders))
+	}
 	for _, o := range orders {
+		s.Log.DebugContext(ctx, "rating question", "order", o.ID, "user_id", o.UserID, "date", o.Date, "dish", o.DishName)
 		err := s.publish(ctx, contracts.SubjectRatingRequested, contracts.RatingRequested{UserID: o.UserID, OrderID: o.ID})
 		if errors.Is(err, bus.ErrOff) {
 			return nil
@@ -165,5 +187,7 @@ func (s *Service) askRatings(ctx context.Context) error {
 }
 
 func (s *Service) forgetEvents(ctx context.Context) error {
-	return s.Store.ForgetProcessed(ctx, s.Now().Add(-s.Cfg.NATSMaxAge-24*time.Hour))
+	before := s.Now().Add(-s.Cfg.NATSMaxAge - 24*time.Hour)
+	s.Log.DebugContext(ctx, "forgetting processed event ids", "before", before)
+	return s.Store.ForgetProcessed(ctx, before)
 }

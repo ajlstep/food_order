@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"food-order/core/internal/applog"
 	"food-order/core/internal/bus"
 	"food-order/core/internal/contracts"
 	"food-order/core/internal/rules"
@@ -21,6 +22,7 @@ import (
 // and core asks for the menu if nobody did. The result goes to the bot as
 // food.recommendation.ready.
 func (s *Service) RequestRecommendation(ctx context.Context, userID int64, date string) (contracts.Recommendation, error) {
+	s.Log.InfoContext(ctx, "recommendation requested", "user_id", userID, "date", date)
 	d, err := parseDate("date", date)
 	if err != nil {
 		return contracts.Recommendation{}, err
@@ -35,6 +37,7 @@ func (s *Service) RequestRecommendation(ctx context.Context, userID int64, date 
 
 	// one in progress is enough (the bot's scheduler and /meniu may meet)
 	if cur, err := s.Store.LatestRec(ctx, userID, date); err == nil && cur.Status != store.RecReady {
+		s.Log.InfoContext(ctx, "a recommendation is already in progress", "user_id", userID, "date", date, "rec", cur.ID, "status", cur.Status)
 		// but if it waits for a menu nobody is asking for any more (the
 		// request failed, e.g. parse_failed), the user asking again asks for
 		// the menu again; a request still in flight is not doubled
@@ -56,9 +59,10 @@ func (s *Service) RequestRecommendation(ctx context.Context, userID int64, date 
 	if err != nil {
 		return contracts.Recommendation{}, err
 	}
+	s.Log.InfoContext(ctx, "recommendation created", "rec", rec.ID, "request_id", rec.RequestID, "user_id", userID, "date", date, "menu_ready", ready)
 	if ready {
 		if err := s.generate(ctx, rec); err != nil {
-			s.Log.Warn("generate", "rec", rec.ID, "err", err) // stays waiting_menu; the scheduler tries again
+			s.Log.WarnContext(ctx, "generate", "rec", rec.ID, "err", err) // stays waiting_menu; the scheduler tries again
 		}
 	} else if err := s.ensureMenu(ctx, date, true); err != nil {
 		return contracts.Recommendation{}, err
@@ -76,11 +80,13 @@ func (s *Service) Recommendation(ctx context.Context, userID int64, date string)
 	}
 	rec, err := s.Store.LatestRec(ctx, userID, date)
 	if errors.Is(err, store.ErrNotFound) {
+		s.Log.DebugContext(ctx, "no recommendation for the day", "user_id", userID, "date", date)
 		return contracts.Recommendation{}, notFound("not_found", "Nu am recomandare pentru ziua asta.")
 	}
 	if err != nil {
 		return contracts.Recommendation{}, err
 	}
+	s.Log.DebugContext(ctx, "recommendation read", "user_id", userID, "date", date, "rec", rec.ID, "status", rec.Status, "picks", len(rec.Picks))
 	return s.view(rec), nil
 }
 
@@ -113,8 +119,11 @@ func picksView(rec store.Rec) []contracts.Pick {
 func (s *Service) generate(ctx context.Context, rec store.Rec) error {
 	ok, err := s.Store.ClaimRec(ctx, rec.ID, store.RecWaitingMenu, store.RecGenerating, s.Now())
 	if err != nil || !ok {
+		s.Log.DebugContext(ctx, "recommendation not claimed (someone else is on it)", "rec", rec.ID, "err", err)
 		return err // someone else is on it
 	}
+	ctx = applog.With(ctx, "rec", rec.ID, "request_id", rec.RequestID, "user_id", rec.UserID, "date", rec.Date)
+	start := time.Now()
 	cands, err := s.candidates(ctx, rec.UserID, rec.Date)
 	if err == nil {
 		err = s.Store.SetCandidates(ctx, rec.ID, cands)
@@ -122,11 +131,14 @@ func (s *Service) generate(ctx context.Context, rec store.Rec) error {
 	if err != nil {
 		// back to waiting: the scheduler tries again (e.g. catalog was down)
 		if _, rerr := s.Store.ClaimRec(ctx, rec.ID, store.RecGenerating, store.RecWaitingMenu, s.Now()); rerr != nil {
-			s.Log.Error("revert recommendation", "rec", rec.ID, "err", rerr)
+			s.Log.ErrorContext(ctx, "revert recommendation", "rec", rec.ID, "err", rerr)
 		}
+		s.Log.WarnContext(ctx, "candidates not available, the recommendation waits again", "err", err)
 		return err
 	}
+	s.Log.InfoContext(ctx, "candidates scored", "candidates", len(cands), "ms", applog.Since(start), "top", candidateSummary(cands))
 	if len(cands) == 0 || !s.Cfg.LLMEnabled {
+		s.Log.InfoContext(ctx, "picks from the score only", "candidates", len(cands), "llm_enabled", s.Cfg.LLMEnabled)
 		return s.finish(ctx, rec.ID, s.scorePicks(cands))
 	}
 
@@ -143,10 +155,12 @@ func (s *Service) generate(ctx context.Context, rec store.Rec) error {
 			Tags: nonNil(c.Tags), AvgRating: c.AvgRating,
 		})
 	}
+	s.Log.DebugContext(ctx, "llm context", "context", ctxLLM)
 	if err := s.publish(ctx, contracts.SubjectRecommendationRequested, req); err != nil {
+		s.Log.WarnContext(ctx, "llm request not sent, picks from the score", "err", err)
 		return s.finish(ctx, rec.ID, s.scorePicks(cands)) // no broker: picks from the score
 	}
-	s.Log.Info("recommendation sent to llm", "rec", rec.ID, "user_id", rec.UserID, "date", rec.Date, "candidates", len(cands))
+	s.Log.InfoContext(ctx, "recommendation sent to llm", "rec", rec.ID, "user_id", rec.UserID, "date", rec.Date, "candidates", len(cands))
 	return nil
 }
 
@@ -156,6 +170,7 @@ func (s *Service) candidates(ctx context.Context, userID int64, date string) ([]
 	if err != nil {
 		return nil, err
 	}
+	s.Log.DebugContext(ctx, "menu from catalog", "dishes", len(dishes))
 	prefs, err := s.Store.Prefs(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -187,13 +202,18 @@ func (s *Service) candidates(ctx context.Context, userID int64, date string) ([]
 		if sim, err := s.Catalog.Similar(ctx, likedIDs, candIDs); err == nil {
 			in.Similarity = sim
 		} else {
-			s.Log.Warn("similarity not available, scoring without it", "err", err)
+			s.Log.WarnContext(ctx, "similarity not available, scoring without it", "err", err)
 		}
 	}
 
+	s.Log.DebugContext(ctx, "scoring input", "dishes", len(dishes), "prefs", len(prefs), "history", len(in.History),
+		"liked", len(liked), "similarity", len(in.Similarity))
 	res := rules.Rank(in, s.Cfg.Score)
 	for _, e := range res.Excluded {
-		s.Log.Debug("dish excluded", "user_id", userID, "date", date, "dish_id", e.DishID, "reason", e.Reason)
+		s.Log.DebugContext(ctx, "dish excluded", "user_id", userID, "date", date, "dish_id", e.DishID, "reason", e.Reason)
+	}
+	for i, r := range res.Ranked {
+		s.Log.DebugContext(ctx, "dish scored", "rank", i+1, "dish_id", r.Dish.ID, "dish", r.Dish.Name, "score", r.Score, "avg_rating", r.AvgRating, "parts", r.Parts)
 	}
 	n := min(len(res.Ranked), s.Cfg.RecCandidates)
 	out := make([]store.Candidate, 0, n)
@@ -233,8 +253,10 @@ func (s *Service) scorePicks(cands []store.Candidate) []store.PickRef {
 func (s *Service) finish(ctx context.Context, recID int64, picks []store.PickRef) error {
 	ok, err := s.Store.FinishRec(ctx, recID, picks, s.Now())
 	if err != nil || !ok {
+		s.Log.DebugContext(ctx, "recommendation not finished (already finished?)", "rec", recID, "err", err)
 		return err
 	}
+	s.Log.DebugContext(ctx, "recommendation finished", "rec", recID, "picks", picks)
 	return s.notify(ctx, recID)
 }
 
@@ -249,7 +271,7 @@ func (s *Service) notify(ctx context.Context, recID int64) error {
 	if err := s.publish(ctx, contracts.SubjectRecommendationReady, ev); err != nil {
 		return nil // kept for later
 	}
-	s.Log.Info("recommendation ready", "rec", rec.ID, "user_id", rec.UserID, "date", rec.Date, "picks", len(ev.Picks))
+	s.Log.InfoContext(ctx, "recommendation ready", "rec", rec.ID, "user_id", rec.UserID, "date", rec.Date, "picks", len(ev.Picks))
 	return s.Store.MarkNotified(ctx, rec.ID, s.Now())
 }
 
@@ -258,15 +280,17 @@ func (s *Service) notify(ctx context.Context, recID int64) error {
 func (s *Service) OnRecommendationGenerated(ctx context.Context, ev contracts.RecommendationGenerated) error {
 	rec, err := s.Store.RecByRequestID(ctx, ev.RequestID)
 	if errors.Is(err, store.ErrNotFound) {
-		s.Log.Warn("llm answer for an unknown request", "request_id", ev.RequestID)
+		s.Log.WarnContext(ctx, "llm answer for an unknown request", "request_id", ev.RequestID)
 		return nil
 	}
 	if err != nil {
 		return err
 	}
 	if rec.Status != store.RecGenerating {
+		s.Log.InfoContext(ctx, "late llm answer ignored", "rec", rec.ID, "status", rec.Status, "request_id", ev.RequestID)
 		return nil // already finished (e.g. by the llm timeout)
 	}
+	s.Log.InfoContext(ctx, "llm answered", "rec", rec.ID, "user_id", rec.UserID, "date", rec.Date, "picks", len(ev.Picks))
 	known := map[int64]bool{}
 	for _, c := range rec.Candidates {
 		known[c.DishID] = true
@@ -275,13 +299,14 @@ func (s *Service) OnRecommendationGenerated(ctx context.Context, ev contracts.Re
 	seen := map[int64]bool{}
 	for _, p := range ev.Picks {
 		if !known[p.ID] || seen[p.ID] || len(picks) >= s.Cfg.RecPicks {
+			s.Log.DebugContext(ctx, "llm pick dropped", "dish_id", p.ID, "known", known[p.ID], "duplicate", seen[p.ID], "reason", p.Reason)
 			continue
 		}
 		seen[p.ID] = true
 		picks = append(picks, store.PickRef{DishID: p.ID, Reason: cut(strings.TrimSpace(p.Reason), 300)})
 	}
 	if len(picks) == 0 {
-		s.Log.Warn("llm gave no valid pick, using the score", "rec", rec.ID)
+		s.Log.WarnContext(ctx, "llm gave no valid pick, using the score", "rec", rec.ID)
 		picks = s.scorePicks(rec.Candidates)
 	}
 	return s.finish(ctx, rec.ID, picks)
@@ -367,6 +392,15 @@ func (s *Service) llmContext(ctx context.Context, userID int64, date string) (co
 		}
 	}
 	return out, nil
+}
+
+// candidateSummary is the short form of candidates for the logs.
+func candidateSummary(cands []store.Candidate) []string {
+	out := make([]string, 0, len(cands))
+	for _, c := range cands {
+		out = append(out, strconv.FormatInt(c.DishID, 10)+" "+c.Name+" ("+strconv.FormatFloat(c.Score, 'f', 3, 64)+")")
+	}
+	return out
 }
 
 func prefsView(ps []store.Pref) []contracts.Pref {

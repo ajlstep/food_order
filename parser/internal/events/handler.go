@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"food-order/parser/internal/applog"
 	"food-order/parser/internal/bus"
 	"food-order/parser/internal/contracts"
 	"food-order/parser/internal/menu"
@@ -62,6 +63,7 @@ func (h *Handler) Handle(ctx context.Context, subject string, raw []byte) error 
 		return fmt.Errorf("%w: unknown event type %q", bus.ErrPermanent, env.Type)
 	}
 	if h.duplicate(env.ID) {
+		h.Log.DebugContext(ctx, "duplicate event skipped", "event_id", env.ID)
 		return nil
 	}
 	var req contracts.MenuRequested
@@ -74,21 +76,26 @@ func (h *Handler) Handle(ctx context.Context, subject string, raw []byte) error 
 
 	answer, subjectOut := h.answer(ctx, req)
 	if ctx.Err() != nil { // shutting down: let JetStream deliver it again
+		h.Log.WarnContext(ctx, "shutting down before answering, the request will be redelivered", "request_id", req.RequestID)
 		return ctx.Err()
 	}
 	if err := h.Pub.Publish(ctx, subjectOut, answer); err != nil {
+		h.Log.ErrorContext(ctx, "answer not sent", "request_id", req.RequestID, "subject", subjectOut, "err", err)
 		return err
 	}
+	h.Log.InfoContext(ctx, "menu request answered", "request_id", req.RequestID, "subject", subjectOut)
 	h.remember(env.ID)
 	return nil
 }
 
 // answer fetches every day of the request and builds the reply.
 func (h *Handler) answer(ctx context.Context, req contracts.MenuRequested) (any, string) {
-	fmt.Println("start handle")
+	ctx = applog.With(ctx, "request_id", req.RequestID)
+	start := time.Now()
+	h.Log.InfoContext(ctx, "menu requested", "from", req.From, "to", req.To)
 	fail := func(code, format string, args ...any) (any, string) {
 		msg := fmt.Sprintf(format, args...)
-		h.Log.Warn("menu request failed", "request_id", req.RequestID, "from", req.From, "to", req.To, "code", code, "msg", msg)
+		h.Log.WarnContext(ctx, "menu request failed", "request_id", req.RequestID, "from", req.From, "to", req.To, "code", code, "msg", msg)
 		return contracts.MenuError{RequestID: req.RequestID, Code: code, Message: msg}, contracts.SubjectMenuError
 	}
 
@@ -113,12 +120,15 @@ func (h *Handler) answer(ctx context.Context, req contracts.MenuRequested) (any,
 	var empty []string
 	for d := from; !d.After(to); d = d.AddDate(0, 0, 1) {
 		date := d.Format("2006-01-02")
+		dayStart := time.Now()
 		res, err := h.Menu.Get(ctx, d)
+		h.Log.DebugContext(ctx, "menu day fetched", "date", date, "dishes", len(res.Items), "cached", res.Cached, "ms", applog.Since(dayStart), "err", err)
 		switch {
 		case err == nil:
 			out.Days = append(out.Days, contracts.Day{Date: date, Items: toItems(res.Items)})
-			h.Log.Info("menu found", "request_id", req.RequestID, "date", date, "dishes", len(res.Items), "cached", res.Cached)
+			h.Log.InfoContext(ctx, "menu found", "request_id", req.RequestID, "date", date, "dishes", len(res.Items), "cached", res.Cached)
 		case errors.Is(err, menu.ErrEmpty): // also "throttled, and last time it was empty"
+			h.Log.InfoContext(ctx, "no menu for the day yet", "date", date, "err", err)
 			empty = append(empty, date)
 		case errors.Is(err, menu.ErrParseFailed):
 			return fail(contracts.ErrParseFailed, "%s: pagina nu mai arată cum o știe parserul (site schimbat?): %v", date, err)
@@ -130,8 +140,9 @@ func (h *Handler) answer(ctx context.Context, req contracts.MenuRequested) (any,
 		return fail(contracts.ErrNoMenu, "încă nu e meniu pentru %v", empty)
 	}
 	if len(empty) > 0 { // e.g. a weekend inside the period: the days that have a menu go
-		h.Log.Info("some days have no menu", "request_id", req.RequestID, "days", empty)
+		h.Log.InfoContext(ctx, "some days have no menu", "request_id", req.RequestID, "days", empty)
 	}
+	h.Log.InfoContext(ctx, "menu ready to send", "days", len(out.Days), "ms", applog.Since(start))
 	return out, contracts.SubjectMenuFetched
 }
 

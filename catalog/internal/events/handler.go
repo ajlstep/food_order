@@ -38,6 +38,7 @@ func (h *Handler) Handle(ctx context.Context, subject string, raw []byte) error 
 			return err
 		}
 		if done {
+			h.Svc.Log.DebugContext(ctx, "duplicate event skipped", "event_id", env.ID, "type", env.Type)
 			return nil // a duplicate
 		}
 	}

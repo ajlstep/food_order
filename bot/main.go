@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -22,6 +23,7 @@ import (
 	"time"
 	_ "time/tzdata" // Europe/Chisinau also works in a minimal Docker image
 
+	"food-order/bot/internal/applog"
 	"food-order/bot/internal/config"
 	"food-order/bot/internal/events"
 	"food-order/bot/internal/scheduler"
@@ -32,20 +34,29 @@ import (
 
 func main() {
 	envFile := flag.String("env", ".env", "path of the .env file (optional)")
+	debug := flag.Bool("debug", false, "send the detailed logs too (same as BOT_ADDITIONAL_LOGS=true)")
 	flag.Parse()
 
-	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	if err := run(log, *envFile); err != nil {
-		log.Error("bot stopped", "err", err)
+	cfg, err := config.Load(*envFile)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "bot:", err) // no logger yet: the config says where logs go
 		os.Exit(1)
 	}
+	al := applog.New(applog.Options{
+		Service: "bot", URL: cfg.NATSURL, Token: cfg.NATSToken, User: cfg.NATSUser, Password: cfg.NATSPassword,
+		Additional: cfg.AdditionalLogs || *debug, Console: cfg.LogConsole,
+	})
+	slog.SetDefault(al.Logger)
+	if err := run(al.Logger, cfg); err != nil {
+		al.Fatal("bot stopped", "err", err)
+		os.Exit(1)
+	}
+	al.Info("bot stopped")
+	al.Close()
 }
 
-func run(log *slog.Logger, envFile string) error {
-	cfg, err := config.Load(envFile)
-	if err != nil {
-		return err
-	}
+func run(log *slog.Logger, cfg config.Config) error {
+	var err error
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -57,14 +68,14 @@ func run(log *slog.Logger, envFile string) error {
 	defer db.Close()
 
 	hc := &http.Client{Timeout: cfg.HTTPTimeout}
-	core := services.NewCore(cfg.CoreURL, hc)
+	core := services.NewCore(cfg.CoreURL, hc).WithLog(log)
 	b, err := tg.New(tg.Options{
 		Token:        cfg.TelegramToken,
 		AdminChatID:  cfg.AdminChatID,
 		AllowedChats: cfg.AllowedChats,
 		Users:        db,
 		Core:         core,
-		Catalog:      services.NewCatalog(cfg.CatalogURL, hc),
+		Catalog:      services.NewCatalog(cfg.CatalogURL, hc).WithLog(log),
 		Log:          log,
 	})
 	if err != nil {
@@ -80,7 +91,8 @@ func run(log *slog.Logger, envFile string) error {
 	// One HTTP server: /healthz for Docker and, in webhook mode, the path
 	// Telegram calls. Only the webhook path should be exposed by the proxy.
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		log.DebugContext(r.Context(), "healthz", "remote", r.RemoteAddr)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
@@ -128,6 +140,8 @@ func run(log *slog.Logger, envFile string) error {
 		go b.RunPolling(ctx)
 		log.Info("bot started (polling)", "db", cfg.DBPath, "addr", cfg.Addr, "core", cfg.CoreURL, "catalog", cfg.CatalogURL, "nats", cfg.NATSURL)
 	}
+	log.Info("bot logs", "additional_logs", cfg.AdditionalLogs, "log_console", cfg.LogConsole,
+		"admin_chat", cfg.AdminChatID != 0, "allowed_chats", len(cfg.AllowedChats))
 
 	select {
 	case err = <-errc:

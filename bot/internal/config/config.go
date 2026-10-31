@@ -33,6 +33,9 @@ const (
 	EnvMode          = "BOT_MODE"
 	EnvWebhookURL    = "BOT_WEBHOOK_URL"
 	EnvWebhookSecret = "BOT_WEBHOOK_SECRET"
+
+	EnvAdditionalLogs = "BOT_ADDITIONAL_LOGS"
+	EnvLogConsole     = "BOT_LOG_CONSOLE"
 )
 
 // How updates come from Telegram.
@@ -68,6 +71,10 @@ type Config struct {
 	WebhookURL    string // public https URL that Telegram calls
 	WebhookPath   string // path part of WebhookURL, served on Addr
 	WebhookSecret string // Telegram sends it in X-Telegram-Bot-Api-Secret-Token
+
+	// Logs go to NATS (logs.<level>), to the logs service.
+	AdditionalLogs bool // also send the detailed debug logs (every update, message, call)
+	LogConsole     bool // also print the logs to the console
 }
 
 // Load reads the .env file (if it exists) and the environment.
@@ -106,6 +113,17 @@ func parse(get func(key, def string) string) (Config, error) {
 
 	if cfg.TelegramToken == "" {
 		errs = append(errs, fmt.Errorf("%s is required", EnvTelegramToken))
+	}
+
+	for key, dst := range map[string]*bool{EnvAdditionalLogs: &cfg.AdditionalLogs, EnvLogConsole: &cfg.LogConsole} {
+		switch v := strings.ToLower(strings.TrimSpace(get(key, "false"))); v {
+		case "1", "true", "yes", "da", "on":
+			*dst = true
+		case "", "0", "false", "no", "nu", "off":
+			*dst = false
+		default:
+			errs = append(errs, fmt.Errorf("%s=%q: expected true or false", key, v))
+		}
 	}
 
 	if v := get(EnvAdminChatID, ""); v != "" {

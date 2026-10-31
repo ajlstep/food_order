@@ -3,6 +3,7 @@
 package events
 
 import (
+	"log/slog"
 	"context"
 	"encoding/json"
 	"errors"
@@ -42,6 +43,7 @@ func (h *Handler) Handle(ctx context.Context, raw []byte) error {
 		return fmt.Errorf("%w: envelope: %v", ErrPermanent, err)
 	}
 	if env.ID != "" && h.seen.has(env.ID) {
+		slog.Default().DebugContext(ctx, "duplicate event skipped", "event_id", env.ID, "type", env.Type)
 		return nil // duplicate
 	}
 

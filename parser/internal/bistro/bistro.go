@@ -39,6 +39,7 @@ import (
 
 	"github.com/PuerkitoBio/goquery"
 
+	"food-order/parser/internal/applog"
 	"food-order/parser/internal/menu"
 )
 
@@ -126,13 +127,13 @@ func (f *Fetcher) Fetch(ctx context.Context, date time.Time) ([]menu.Item, error
 	if err != nil {
 		why = err.Error()
 	}
-	f.log().Info("date page gave nothing, trying the week page", "date", date.Format("2006-01-02"), "why", why, "url", weekURL)
+	f.log().InfoContext(ctx, "date page gave nothing, trying the week page", "date", date.Format("2006-01-02"), "why", why, "url", weekURL)
 	weekItems, weekErr := f.fetchPage(ctx, weekURL)
 	if weekErr == nil && len(weekItems) > 0 {
 		return weekItems, nil
 	}
 	if weekErr != nil {
-		f.log().Warn("week page failed too", "url", weekURL, "err", weekErr)
+		f.log().WarnContext(ctx, "week page failed too", "url", weekURL, "err", weekErr)
 	}
 	return items, err
 }
@@ -152,26 +153,35 @@ func (f *Fetcher) fetchPage(ctx context.Context, pageURL string) ([]menu.Item, e
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
+	start := time.Now()
+	f.log().DebugContext(ctx, "site request", "url", pageURL, "user_agent", f.UserAgent)
 	resp, err := client.Do(req)
 	if err != nil {
+		f.log().WarnContext(ctx, "site did not answer", "url", pageURL, "ms", applog.Since(start), "err", err)
 		return nil, fmt.Errorf("%w: request %s: %w", menu.ErrSourceUnavailable, pageURL, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		f.log().WarnContext(ctx, "site answered with an error", "url", pageURL, "status", resp.StatusCode, "ms", applog.Since(start))
 		return nil, fmt.Errorf("%w: site answered %s for %s", menu.ErrSourceUnavailable, resp.Status, pageURL)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 	if err != nil {
+		f.log().WarnContext(ctx, "site page could not be read", "url", pageURL, "ms", applog.Since(start), "err", err)
 		return nil, fmt.Errorf("%w: read %s: %w", menu.ErrSourceUnavailable, pageURL, err)
 	}
+	f.log().DebugContext(ctx, "site answered", "url", pageURL, "status", resp.StatusCode, "bytes", len(body),
+		"content_type", resp.Header.Get("Content-Type"), "ms", applog.Since(start))
 
 	items, err := Parse(body)
 	if err != nil {
+		f.log().ErrorContext(ctx, "site page not understood", "url", pageURL, "bytes", len(body), "err", err)
 		return nil, err
 	}
+	f.log().DebugContext(ctx, "site page parsed", "url", pageURL, "dishes", len(items))
 	if len(items) > 0 { // keep the raw page only for runs that worked
 		if err := f.Raw.Save("bistro_last_ok.html", body); err != nil {
-			f.log().Warn("could not save raw page", "err", err)
+			f.log().WarnContext(ctx, "could not save raw page", "err", err)
 		}
 	}
 	return items, nil

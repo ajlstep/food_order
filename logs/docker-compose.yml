@@ -1,0 +1,48 @@
+services:
+  # listens to logs.> on NATS and writes every message into SQLite
+  logs-collector:
+    build: .
+    image: food_order/logs
+    container_name: logs-collector
+    command: ["collect"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      LOGS_DB_PATH: /data/logs.db
+    volumes:
+      - logs-data:/data
+    networks:
+      - food_order
+    restart: unless-stopped
+
+  # web UI: table of logs, reads the same database
+  logs-web:
+    image: food_order/logs
+    container_name: logs-web
+    command: ["web"]
+    depends_on:
+      - logs-collector
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      LOGS_DB_PATH: /data/logs.db
+    ports:
+      - "127.0.0.1:9084:9084"
+    volumes:
+      - logs-data:/data
+    networks:
+      - food_order
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9084/healthz"]
+      interval: 30s
+      timeout: 3s
+    restart: unless-stopped
+
+volumes:
+  logs-data:
+
+networks:
+  food_order:
+    external: true

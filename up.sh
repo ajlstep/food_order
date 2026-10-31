@@ -9,7 +9,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 NETWORK=food_order
 # ordinea contează: nats primul, ngrok ultimul
-SERVICES=(nuts catalog core parser bot ngrock)
+SERVICES=(nuts logs catalog core parser bot ngrock)
 
 compose() { (cd "$ROOT/$1" && docker compose "${@:2}"); }
 
