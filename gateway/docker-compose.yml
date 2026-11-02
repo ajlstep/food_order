@@ -1,0 +1,22 @@
+services:
+  # the way in: HTTP from the bot -> NATS requests to the services
+  gateway:
+    build:
+      context: ..                 # project root: the build needs ../shared
+      dockerfile: gateway/Dockerfile
+    image: food_order/gateway
+    container_name: gateway
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      # only this computer, for trying it with curl; the bot reaches it
+      # inside Docker as http://gateway:8080
+      - "127.0.0.1:8080:8080"
+    networks:
+      - food_order
+    restart: unless-stopped
+
+networks:
+  food_order:
+    external: true
