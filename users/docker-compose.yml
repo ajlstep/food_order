@@ -1,0 +1,25 @@
+services:
+  # accounts, channels and email confirmation; talks only over NATS (no ports)
+  users:
+    build:
+      context: ..                 # project root: the build needs ../shared
+      dockerfile: users/Dockerfile
+    image: food_order/users
+    container_name: users
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      USERS_DB_PATH: /data/users.db
+    volumes:
+      - users-data:/data
+    networks:
+      - food_order
+    restart: unless-stopped
+
+volumes:
+  users-data:
+
+networks:
+  food_order:
+    external: true

@@ -2,15 +2,38 @@ services:
   nats:
     image: nats:2-alpine
     container_name: nats
-    command: ["-js", "-sd", "/data", "-m", "8222"]
+    # users and permissions are in nats.conf; passwords come from .env
+    command: ["-c", "/etc/nats/nats.conf"]
+    env_file:
+      - .env
     ports:
-      - "4222:4222"   # client
-      - "8222:8222"   # monitorizare HTTP
+      # only this computer: the old services have no password yet (see nats.conf, "legacy")
+      - "127.0.0.1:4222:4222"   # client
+      - "127.0.0.1:8222:8222"   # HTTP monitor
     volumes:
+      - ./nats.conf:/etc/nats/nats.conf:ro
       - nats-data:/data
     networks:
       - food_order
     restart: unless-stopped
+
+  # Creates the streams and consumers (FOOD, LOGS, NOTIFY) and exits. Runs again
+  # at every `./up.sh nuts`; creating what already exists changes nothing.
+  nats-setup:
+    build:
+      context: ..               # project root: the build needs ../shared
+      dockerfile: nuts/setup.Dockerfile
+    image: food_order/nats-setup
+    container_name: nats-setup
+    depends_on:
+      - nats
+    environment:
+      NATS_URL: nats://nats:4222
+      NATS_USER: admin
+      NATS_PASSWORD: ${NATS_PASSWORD_ADMIN}
+    networks:
+      - food_order
+    restart: "no"
 
 volumes:
   nats-data:

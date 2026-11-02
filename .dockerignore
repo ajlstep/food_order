@@ -1,0 +1,8 @@
+# Context for the services that build from the project root (users, nats-setup).
+# Keep it small: no git history, no test browser profile, no secrets, no data.
+.git
+tests
+**/.env
+**/data
+**/*.db
+**/*.db-*
