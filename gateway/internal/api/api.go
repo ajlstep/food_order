@@ -15,6 +15,8 @@ import (
 	"food-order/gateway/internal/forward"
 	"food-order/gateway/internal/reply"
 	"food-order/gateway/internal/requestid"
+	"food-order/shared/contracts/catalog"
+	"food-order/shared/contracts/core"
 	"food-order/shared/contracts/gateway"
 	"food-order/shared/contracts/users"
 	"food-order/shared/rpc"
@@ -51,6 +53,34 @@ func routes() []route {
 		{gateway.LocationsDelete, access.LevelActive, users.SubjectProfileLocationsDel, locationIDData},
 		{gateway.LocationsDefault, access.LevelActive, users.SubjectProfileLocationsMain, locationIDData},
 		{gateway.ChannelsGet, access.LevelActive, users.SubjectProfileChannelsGet, nil},
+
+		// food: the bot asks, core and catalog answer
+		{gateway.RecommendationCreate, access.LevelActive, core.SubjectRecommendationCreate, nil},
+		{gateway.RecommendationGet, access.LevelActive, core.SubjectRecommendationGet, dateData},
+		{gateway.OrderCreate, access.LevelActive, core.SubjectOrderCreate, nil},
+		{gateway.OrderRate, access.LevelActive, core.SubjectOrderRate, orderRateData},
+		{gateway.OrdersList, access.LevelActive, core.SubjectOrdersList, periodData},
+		{gateway.StatsGet, access.LevelActive, core.SubjectStats, periodData},
+		{gateway.AllergensConfirm, access.LevelActive, catalog.SubjectAllergensConfirm, allergensConfirmData},
+		{gateway.PartnersList, access.LevelActive, catalog.SubjectPartnersList, dateData},
+
+		// companies, groups, invitations
+		{gateway.CompanyGet, access.LevelActive, users.SubjectOrgCompanyGet, nil},
+		{gateway.CompanyCreate, access.LevelActive, users.SubjectOrgCompanyCreate, nil},
+		{gateway.CompanyUpdate, access.LevelActive, users.SubjectOrgCompanyUpdate, nil},
+		{gateway.CompanyLeave, access.LevelActive, users.SubjectOrgCompanyLeave, nil},
+		{gateway.CompanyInvite, access.LevelActive, users.SubjectOrgCompanyInvite, nil},
+		{gateway.CompanyRemove, access.LevelActive, users.SubjectOrgCompanyRemove, memberData},
+		{gateway.CompanyReport, access.LevelActive, core.SubjectCompanyReport, periodData},
+		{gateway.GroupGet, access.LevelActive, users.SubjectOrgGroupGet, nil},
+		{gateway.GroupCreate, access.LevelActive, users.SubjectOrgGroupCreate, nil},
+		{gateway.GroupDelete, access.LevelActive, users.SubjectOrgGroupDelete, nil},
+		{gateway.GroupLeave, access.LevelActive, users.SubjectOrgGroupLeave, nil},
+		{gateway.GroupInvite, access.LevelActive, users.SubjectOrgGroupInvite, nil},
+		{gateway.GroupRemove, access.LevelActive, users.SubjectOrgGroupRemove, memberData},
+		{gateway.InvitesList, access.LevelActive, users.SubjectOrgInviteList, nil},
+		{gateway.InviteAccept, access.LevelActive, users.SubjectOrgInviteAccept, inviteData},
+		{gateway.InviteDecline, access.LevelActive, users.SubjectOrgInviteDecline, inviteData},
 	}
 }
 
@@ -133,11 +163,67 @@ func phoneSetData(r *http.Request, body []byte) (any, error) {
 
 // locationIDData takes the id from the path (/v1/me/locations/{id}).
 func locationIDData(r *http.Request, _ []byte) (any, error) {
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil || id <= 0 {
-		return nil, rpc.NewError(rpc.CodeBadRequest, "the location id must be a positive number")
+	id, err := pathID(r)
+	if err != nil {
+		return nil, err
 	}
 	return users.LocationIDRequest{ID: id}, nil
+}
+
+// dateData takes the day from the query (?date=).
+func dateData(r *http.Request, _ []byte) (any, error) {
+	return map[string]string{"date": r.URL.Query().Get("date")}, nil
+}
+
+// periodData takes the period from the query (?from=&to=).
+func periodData(r *http.Request, _ []byte) (any, error) {
+	q := r.URL.Query()
+	return core.PeriodRequest{From: q.Get("from"), To: q.Get("to")}, nil
+}
+
+// pathID reads a number from the path.
+func pathID(r *http.Request) (int64, error) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		return 0, rpc.NewError(rpc.CodeBadRequest, "the id must be a positive number")
+	}
+	return id, nil
+}
+
+// orderRateData adds the order from the path to the body.
+func orderRateData(r *http.Request, body []byte) (any, error) {
+	var in core.RateRequest
+	if err := forward.Decode(body, &in); err != nil {
+		return nil, err
+	}
+	var err error
+	if in.OrderID, err = pathID(r); err != nil {
+		return nil, err
+	}
+	return in, nil
+}
+
+// allergensConfirmData adds the dish from the path to the body.
+func allergensConfirmData(r *http.Request, body []byte) (any, error) {
+	var in catalog.ConfirmAllergensRequest
+	if err := forward.Decode(body, &in); err != nil {
+		return nil, err
+	}
+	var err error
+	if in.DishID, err = pathID(r); err != nil {
+		return nil, err
+	}
+	return in, nil
+}
+
+// memberData takes the member from the path (/members/{id}).
+func memberData(r *http.Request, _ []byte) (any, error) {
+	return users.RemoveRequest{UserID: r.PathValue("id")}, nil
+}
+
+// inviteData takes the invitation from the path (/invites/{id}/...).
+func inviteData(r *http.Request, _ []byte) (any, error) {
+	return users.InviteIDRequest{ID: r.PathValue("id")}, nil
 }
 
 func userID(ctx context.Context) string { return access.PersonFrom(ctx).UserID }

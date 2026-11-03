@@ -13,8 +13,9 @@ import (
 	"time"
 
 	"food-order/catalog/internal/config"
-	"food-order/catalog/internal/contracts"
 	"food-order/catalog/internal/store"
+	contracts "food-order/shared/contracts/catalog"
+	"food-order/shared/contracts/food"
 )
 
 // fakeBus records what is published.
@@ -73,6 +74,7 @@ func newEnv(t *testing.T, change func(*config.Config)) *env {
 	}
 	t.Cleanup(func() { st.Close() })
 	cfg := config.Defaults()
+	cfg.AnalysisEnabled, cfg.EmbedEnabled = true, true // the tests go through the path with llm
 	if change != nil {
 		change(&cfg)
 	}
@@ -106,7 +108,7 @@ func (e *env) importMenu(m contracts.MenuFetched) contracts.ImportResponse {
 
 func (e *env) requests() []contracts.DishAnalyzeRequested {
 	var out []contracts.DishAnalyzeRequested
-	for _, raw := range e.bus.take(contracts.SubjectDishAnalyzeRequested) {
+	for _, raw := range e.bus.take(food.SubjectDishAnalyzeRequested) {
 		var r contracts.DishAnalyzeRequested
 		if err := json.Unmarshal(raw, &r); err != nil {
 			e.t.Fatal(err)
@@ -116,10 +118,10 @@ func (e *env) requests() []contracts.DishAnalyzeRequested {
 	return out
 }
 
-func (e *env) ready() []contracts.MenuReady {
-	var out []contracts.MenuReady
-	for _, raw := range e.bus.take(contracts.SubjectMenuReady) {
-		var r contracts.MenuReady
+func (e *env) ready() []food.MenuReady {
+	var out []food.MenuReady
+	for _, raw := range e.bus.take(food.SubjectMenuReady) {
+		var r food.MenuReady
 		if err := json.Unmarshal(raw, &r); err != nil {
 			e.t.Fatal(err)
 		}
@@ -175,7 +177,7 @@ func TestParserMenuToReady(t *testing.T) {
 		t.Errorf("request status %q", st)
 	}
 	// no embedding before the analysis is over
-	if n := len(e.bus.take(contracts.SubjectDishEmbedRequested)); n != 0 {
+	if n := len(e.bus.take(food.SubjectDishEmbedRequested)); n != 0 {
 		t.Errorf("%d embedding requests too early", n)
 	}
 
@@ -193,7 +195,7 @@ func TestParserMenuToReady(t *testing.T) {
 		!reflect.DeepEqual(ready[0].DishIDs, []int64{reqs[0].DishID, reqs[1].DishID}) {
 		t.Fatalf("ready: %+v", ready)
 	}
-	if n := len(e.bus.take(contracts.SubjectDishEmbedRequested)); n != 2 {
+	if n := len(e.bus.take(food.SubjectDishEmbedRequested)); n != 2 {
 		t.Errorf("want 2 embedding requests, got %d", n)
 	}
 
@@ -408,7 +410,7 @@ func TestLlmTimeout(t *testing.T) {
 	if err := e.svc.Flush(e.ctx); err != nil {
 		t.Fatal(err)
 	}
-	if len(e.bus.take(contracts.SubjectAlert)) != 1 {
+	if len(e.bus.take(food.SubjectAlert)) != 1 {
 		t.Error("no alert")
 	}
 	if len(e.ready()) != 1 {
@@ -460,7 +462,7 @@ func TestSimilar(t *testing.T) {
 	soup2 := contracts.SourceItem{Name: "Zeamă de găină"}
 	cake := contracts.SourceItem{Name: "Tort"}
 	e.importMenu(parserMenu("r1", "2026-11-02", soup, soup2, cake))
-	embeds := e.bus.take(contracts.SubjectDishEmbedRequested)
+	embeds := e.bus.take(food.SubjectDishEmbedRequested)
 	if len(embeds) != 3 {
 		t.Fatalf("want 3 embedding requests, got %d", len(embeds))
 	}
@@ -501,21 +503,21 @@ func TestConfirmAllergens(t *testing.T) {
 	e := newEnv(t, func(c *config.Config) { c.AnalysisEnabled = false })
 	e.importMenu(parserMenu("r1", "2026-11-02", stand))
 	id := e.menu("2026-11-02")[0].ID
-	d, err := e.svc.ConfirmAllergens(e.ctx, 7, id, []string{"Lapte", "lapte", " gluten "})
+	d, err := e.svc.ConfirmAllergens(e.ctx, "u7", id, []string{"Lapte", "lapte", " gluten "})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if d.Allergens.Confirmed == nil || !reflect.DeepEqual(*d.Allergens.Confirmed, []string{"lapte", "gluten"}) || d.Status != "confirmed" {
 		t.Errorf("confirmed: %+v", d.Allergens)
 	}
-	d, err = e.svc.ConfirmAllergens(e.ctx, 7, id, []string{})
+	d, err = e.svc.ConfirmAllergens(e.ctx, "u7", id, []string{})
 	if err != nil || d.Allergens.Confirmed == nil || len(*d.Allergens.Confirmed) != 0 {
 		t.Errorf("confirmed none: %+v %v", d.Allergens, err)
 	}
-	if _, err := e.svc.ConfirmAllergens(e.ctx, 7, 999, []string{}); err == nil {
+	if _, err := e.svc.ConfirmAllergens(e.ctx, "u7", 999, []string{}); err == nil {
 		t.Error("unknown dish")
 	}
-	if _, err := e.svc.ConfirmAllergens(e.ctx, 7, id, nil); err == nil {
+	if _, err := e.svc.ConfirmAllergens(e.ctx, "u7", id, nil); err == nil {
 		t.Error("missing list")
 	}
 }
@@ -529,21 +531,21 @@ func TestDishes(t *testing.T) {
 	items := e.menu("2026-11-02")
 	standID, maxiID := items[0].ID, items[1].ID
 
-	out, err := e.svc.Dishes(e.ctx, "12345, "+itoa(standID)+","+itoa(maxiID), "2026-11-03")
+	out, err := e.svc.Dishes(e.ctx, []int64{12345, standID, maxiID}, "2026-11-03")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(out.Items) != 1 || out.Items[0].ID != standID || *out.Items[0].Price != 50 {
 		t.Errorf("by date: %+v", out.Items)
 	}
-	out, _ = e.svc.Dishes(e.ctx, itoa(standID)+","+itoa(maxiID), "")
+	out, _ = e.svc.Dishes(e.ctx, []int64{standID, maxiID}, "")
 	if len(out.Items) != 2 || out.Items[0].Date != "2026-11-03" || out.Items[1].Date != "2026-11-02" {
 		t.Errorf("latest day: %+v", out.Items)
 	}
 	if _, err := e.svc.Dish(e.ctx, maxiID, "2026-11-03"); err == nil {
 		t.Error("maxi is not on the menu of 2026-11-03")
 	}
-	if _, err := e.svc.Dishes(e.ctx, "1,x", ""); err == nil {
+	if _, err := e.svc.Dishes(e.ctx, nil, ""); err == nil {
 		t.Error("bad ids")
 	}
 	if _, err := e.svc.Menu(e.ctx, "02.11.2026"); err == nil {

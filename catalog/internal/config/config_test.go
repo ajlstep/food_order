@@ -34,6 +34,7 @@ func TestEnvExampleIsTheDefaults(t *testing.T) {
 		t.Errorf("location %v != %v", got.Location, want.Location)
 	}
 	got.Location, want.Location = nil, nil
+	got.NATSPassword = "" // the only value without a default: dev password of the example
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf(".env.example differs from the defaults:\n%+v\n%+v", got, want)
 	}
@@ -54,7 +55,7 @@ func TestValues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AnalysisEnabled || cfg.NATSURL != "" || cfg.Tick != 5*time.Second {
+	if cfg.AnalysisEnabled || cfg.Tick != 5*time.Second {
 		t.Errorf("analysis %v nats %q tick %v", cfg.AnalysisEnabled, cfg.NATSURL, cfg.Tick)
 	}
 	if cfg.AnalysisTimeout != 30*time.Minute {
@@ -67,13 +68,11 @@ func TestErrorsTogether(t *testing.T) {
 		EnvAnalysisTimeout: "soon",
 		EnvEmbedEnabled:    "maybe",
 		EnvTZ:              "Mars/Base",
-		EnvNATSToken:       "t",
-		EnvNATSUser:        "u",
 	}))
 	if err == nil {
 		t.Fatal("expected an error")
 	}
-	for _, k := range []string{EnvAnalysisTimeout, EnvEmbedEnabled, EnvTZ, EnvNATSToken} {
+	for _, k := range []string{EnvAnalysisTimeout, EnvEmbedEnabled, EnvTZ} {
 		if !strings.Contains(err.Error(), k) {
 			t.Errorf("error does not name %s: %v", k, err)
 		}

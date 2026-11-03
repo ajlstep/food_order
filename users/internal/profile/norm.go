@@ -29,9 +29,9 @@ func tooLong(s string, max int) bool { return utf8.RuneCountInString(s) > max }
 
 var phoneForm = regexp.MustCompile(`^[0-9]{8,15}$`)
 
-// normPhone keeps the digits and puts + in front: "+373 69 123-456" and
+// NormPhone keeps the digits and puts + in front: "+373 69 123-456" and
 // "37369123456" are the same phone. ok is false if it cannot be a phone.
-func normPhone(s string) (string, bool) {
+func NormPhone(s string) (string, bool) {
 	var digits strings.Builder
 	for _, r := range s {
 		switch {

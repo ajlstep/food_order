@@ -42,12 +42,14 @@ type Candidate struct {
 	CarbsGMin         *float64 `json:"carbs_g_min,omitempty"`
 	CarbsGMax         *float64 `json:"carbs_g_max,omitempty"`
 	NutritionSource   string   `json:"nutrition_source,omitempty"`
+	PartnerName       string   `json:"partner_name,omitempty"`
+	OrderUntilMs      int64    `json:"order_until_ms,omitempty"`
 }
 
 // Rec is one recommendation of a user for a day.
 type Rec struct {
 	ID         int64
-	UserID     int64
+	UserID     string
 	Date       string
 	RequestID  string
 	Status     string
@@ -82,7 +84,7 @@ func scanRec(r scanner) (Rec, error) {
 }
 
 // CreateRec saves a new recommendation in status waiting_menu.
-func (s *Store) CreateRec(ctx context.Context, userID int64, date, requestID string, now time.Time) (Rec, error) {
+func (s *Store) CreateRec(ctx context.Context, userID, date, requestID string, now time.Time) (Rec, error) {
 	res, err := s.db.ExecContext(ctx, `INSERT INTO recommendations (user_id, date, request_id, status, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?)`, userID, date, requestID, RecWaitingMenu, ts(now), ts(now))
 	if err != nil {
@@ -103,7 +105,7 @@ func (s *Store) RecByRequestID(ctx context.Context, requestID string) (Rec, erro
 }
 
 // LatestRec returns the last recommendation of a user for a day.
-func (s *Store) LatestRec(ctx context.Context, userID int64, date string) (Rec, error) {
+func (s *Store) LatestRec(ctx context.Context, userID, date string) (Rec, error) {
 	return s.oneRec(ctx, `SELECT `+recCols+` FROM recommendations WHERE user_id = ? AND date = ?
 		ORDER BY id DESC LIMIT 1`, userID, date)
 }

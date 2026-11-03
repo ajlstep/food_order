@@ -2,15 +2,13 @@ package tg
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
-
-	"food-order/bot/internal/store"
 )
 
 // recordingTelegram wraps fakeTelegram and remembers the setWebhook body.
@@ -50,14 +48,9 @@ func TestWebhookEndToEnd(t *testing.T) {
 	tgSrv := httptest.NewServer(tgFake)
 	defer tgSrv.Close()
 
-	core := &coreRecorder{}
-	coreSrv := httptest.NewServer(core)
-	defer coreSrv.Close()
-	b, db := newTestBot(t, tgSrv.URL, coreSrv.URL, nil)
-	u, _, err := db.Register(context.Background(), store.Profile{ChatID: 42, TGUserID: 42})
-	if err != nil {
-		t.Fatal(err)
-	}
+	people := newFakeUsers()
+	people.activate("42", "u-42")
+	b := newTestBot(t, tgSrv.URL, people, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -73,10 +66,10 @@ func TestWebhookEndToEnd(t *testing.T) {
 	}
 
 	// Telegram -> our webhook
-	hook := httptest.NewServer(b.WebhookHandler(secret))
+	hook := httptest.NewServer(b.HTTPHandler("/tg/webhook", secret))
 	defer hook.Close()
 	post := func(sec, body string) int {
-		req, _ := http.NewRequest(http.MethodPost, hook.URL, strings.NewReader(body))
+		req, _ := http.NewRequest(http.MethodPost, hook.URL+"/tg/webhook", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		if sec != "" {
 			req.Header.Set("X-Telegram-Bot-Api-Secret-Token", sec)
@@ -95,7 +88,7 @@ func TestWebhookEndToEnd(t *testing.T) {
 	if code := post("wrong_wrong_wrong_wrong", update(2, 42, "/meniu")); code != http.StatusUnauthorized {
 		t.Fatalf("wrong secret: status %d, want 401", code)
 	}
-	if resp, _ := http.Get(hook.URL); resp.StatusCode != http.StatusMethodNotAllowed {
+	if resp, _ := http.Get(hook.URL + "/tg/webhook"); resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Fatalf("GET: status %d, want 405", resp.StatusCode)
 	}
 	if code := post(secret, update(3, 42, "/meniu")); code != http.StatusOK {
@@ -103,11 +96,19 @@ func TestWebhookEndToEnd(t *testing.T) {
 	}
 
 	waitFor(t, func() bool { return len(tgFake.sentTexts()) >= 1 })
-	calls := core.get()
-	if len(calls) != 1 || calls[0] != fmt.Sprintf(`%d POST /v1/recommendations {"date":"2026-10-29"}`, u.ID) {
-		t.Fatalf("core calls = %q (the updates with a bad secret must be ignored)", calls)
+	people.mu.Lock()
+	calls := slices.Clone(people.calls)
+	people.mu.Unlock()
+	if !slices.Equal(calls, []string{"identify 42 42 ion_md Ion", "recommend 42 2026-10-29"}) {
+		t.Fatalf("calls = %q (the updates with a bad secret must be ignored)", calls)
 	}
 	if got := tgFake.sentTexts()[0]; !strings.Contains(got, "Am cerut recomandarea") {
 		t.Fatalf("reply = %q", got)
 	}
+
+	resp, err := http.Get(hook.URL + "/healthz")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("healthz: %v %v", resp, err)
+	}
+	resp.Body.Close()
 }

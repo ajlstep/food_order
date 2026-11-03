@@ -3,6 +3,7 @@ module food-order/core
 go 1.25.0
 
 require (
+	food-order/shared v0.0.0
 	github.com/nats-io/nats.go v1.47.0
 	github.com/ncruces/go-sqlite3 v0.29.1
 )
@@ -16,3 +17,5 @@ require (
 	golang.org/x/crypto v0.42.0 // indirect
 	golang.org/x/sys v0.36.0 // indirect
 )
+
+replace food-order/shared => ../shared

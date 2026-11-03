@@ -27,8 +27,8 @@ func TestMigrationsRunOnceAndKeepData(t *testing.T) {
 	var users, migrations int
 	d.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&users)
 	d.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&migrations)
-	if users != 1 || migrations != 3 {
-		t.Fatalf("users=%d migrations=%d, want 1 and 3", users, migrations)
+	if users != 1 || migrations != 4 {
+		t.Fatalf("users=%d migrations=%d, want 1 and 4", users, migrations)
 	}
 }
 

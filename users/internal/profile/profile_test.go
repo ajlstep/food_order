@@ -123,7 +123,7 @@ func TestSettings(t *testing.T) {
 	}
 	want := map[string]string{
 		"order_time": "16:00", "order_days": "1,2,3,4,5", "timezone": "Europe/Chisinau",
-		"rec_for": "tomorrow", "notify_personal": "true", "notify_group": "true",
+		"rec_for": "tomorrow", "notify_personal": "true", "notify_group": "true", "order_to": "group",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("defaults: %v", got)
@@ -298,13 +298,13 @@ func TestFoodGivesBothLists(t *testing.T) {
 
 func TestTextNormalizers(t *testing.T) {
 	for in, want := range map[string]string{"+37369123456": "+37369123456", "069 123 456": "+069123456", "(373) 69.123.456": "+37369123456"} {
-		if got, ok := normPhone(in); !ok || got != want {
-			t.Errorf("normPhone(%q) = %q, %v; want %q", in, got, ok, want)
+		if got, ok := NormPhone(in); !ok || got != want {
+			t.Errorf("NormPhone(%q) = %q, %v; want %q", in, got, ok, want)
 		}
 	}
 	for _, bad := range []string{"", "1234567", "1234567890123456", "37369abc456", "tel:37369123456"} {
-		if _, ok := normPhone(bad); ok {
-			t.Errorf("normPhone(%q) was accepted", bad)
+		if _, ok := NormPhone(bad); ok {
+			t.Errorf("NormPhone(%q) was accepted", bad)
 		}
 	}
 }

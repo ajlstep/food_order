@@ -10,12 +10,18 @@ import (
 	"testing"
 	"time"
 
-	"food-order/catalog/internal/bus"
 	"food-order/catalog/internal/config"
-	"food-order/catalog/internal/contracts"
 	"food-order/catalog/internal/service"
 	"food-order/catalog/internal/store"
+	contracts "food-order/shared/contracts/catalog"
+	"food-order/shared/contracts/food"
+	"food-order/shared/events"
+	"food-order/shared/streams"
 )
+
+type nobody struct{}
+
+func (nobody) Publish(context.Context, string, any) error { return nil }
 
 func TestHandle(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "catalog.db"))
@@ -25,16 +31,16 @@ func TestHandle(t *testing.T) {
 	defer st.Close()
 	cfg := config.Defaults()
 	cfg.AnalysisEnabled = false
-	svc := service.New(st, bus.Off{}, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	svc := service.New(st, nobody{}, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	h := New(svc)
 	ctx := context.Background()
 
-	env, _ := bus.NewEnvelope(contracts.SubjectMenuFetched, contracts.MenuFetched{RequestID: "r1", Days: []contracts.MenuDay{
+	env, _ := events.NewEnvelope(food.SubjectMenuFetched, contracts.MenuFetched{RequestID: "r1", Days: []contracts.MenuDay{
 		{Date: "2026-11-02", Items: []contracts.SourceItem{{Name: "Ciorbă"}}},
 	}}, time.Now())
 	raw, _ := json.Marshal(env)
 	for i := 0; i < 2; i++ { // the second time is a duplicate
-		if err := h.Handle(ctx, contracts.SubjectMenuFetched, raw); err != nil {
+		if err := h.Handle(ctx, raw); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -47,19 +53,19 @@ func TestHandle(t *testing.T) {
 		subject string
 		data    any
 	}{
-		{contracts.SubjectMenuFetched, contracts.MenuFetched{RequestID: "r2"}}, // no days
-		{contracts.SubjectDishAnalyzed, contracts.DishAnalyzed{}},              // no menu_item_id
-		{contracts.SubjectDishEmbedded, contracts.DishEmbedded{DishID: 1}},     // empty vector
-		{"food.something.else", map[string]int{}},                              // unknown type
+		{food.SubjectMenuFetched, contracts.MenuFetched{RequestID: "r2"}}, // no days
+		{food.SubjectDishAnalyzed, contracts.DishAnalyzed{}},              // no menu_item_id
+		{food.SubjectDishEmbedded, contracts.DishEmbedded{DishID: 1}},     // empty vector
+		{"food.something.else", map[string]int{}},                         // unknown type
 	}
 	for _, b := range bad {
-		env, _ := bus.NewEnvelope(b.subject, b.data, time.Now())
+		env, _ := events.NewEnvelope(b.subject, b.data, time.Now())
 		raw, _ := json.Marshal(env)
-		if err := h.Handle(ctx, b.subject, raw); !errors.Is(err, bus.ErrPermanent) {
+		if err := h.Handle(ctx, raw); !errors.Is(err, streams.ErrDrop) {
 			t.Errorf("%s: want a permanent error, got %v", b.subject, err)
 		}
 	}
-	if err := h.Handle(ctx, "x", []byte("{")); !errors.Is(err, bus.ErrPermanent) {
+	if err := h.Handle(ctx, []byte("{")); !errors.Is(err, streams.ErrDrop) {
 		t.Errorf("broken envelope: %v", err)
 	}
 }

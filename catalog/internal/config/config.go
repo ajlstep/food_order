@@ -16,21 +16,17 @@ import (
 
 // Variable names.
 const (
-	EnvAddr   = "CATALOG_ADDR"
-	EnvDBPath = "CATALOG_DB_PATH"
-	EnvTZ     = "CATALOG_TZ"
+	EnvDBPath       = "CATALOG_DB_PATH"
+	EnvTZ           = "CATALOG_TZ"
+	EnvPartnersFile = "CATALOG_PARTNERS_FILE"
 
 	EnvNATSURL      = "CATALOG_NATS_URL"
-	EnvNATSToken    = "CATALOG_NATS_TOKEN"
 	EnvNATSUser     = "CATALOG_NATS_USER"
 	EnvNATSPassword = "CATALOG_NATS_PASSWORD"
-	EnvNATSStream   = "CATALOG_NATS_STREAM"
-	EnvNATSDurable  = "CATALOG_NATS_DURABLE"
 
 	EnvAnalysisEnabled = "CATALOG_ANALYSIS_ENABLED"
 	EnvEmbedEnabled    = "CATALOG_EMBED_ENABLED"
 	EnvAnalysisTimeout = "CATALOG_ANALYSIS_TIMEOUT"
-	EnvImportEnabled   = "CATALOG_IMPORT_ENABLED"
 	EnvProcessedKeep   = "CATALOG_PROCESSED_KEEP"
 	EnvTick            = "CATALOG_TICK"
 
@@ -40,21 +36,17 @@ const (
 
 // Config is the complete configuration of catalog.
 type Config struct {
-	Addr     string
-	DBPath   string
-	Location *time.Location // what "tomorrow" means for GET /v1/menu without a date
+	DBPath       string
+	Location     *time.Location // what "tomorrow" and the order limits of the partners mean
+	PartnersFile string         // the partners and their schedule, written by hand
 
-	NATSURL      string // empty = run without the broker (HTTP only, no llm)
-	NATSToken    string
+	NATSURL      string
 	NATSUser     string
 	NATSPassword string
-	NATSStream   string // created by core; catalog waits for it
-	NATSDurable  string
 
 	AnalysisEnabled bool          // false: llm is never asked about dishes (analysis.enabled)
-	EmbedEnabled    bool          // false: no embeddings, /v1/similar answers nothing
+	EmbedEnabled    bool          // false: no embeddings, similarity answers nothing
 	AnalysisTimeout time.Duration // llm did not answer: the menu goes ready with what there is
-	ImportEnabled   bool          // POST /v1/import (debugging: a menu without the broker)
 	ProcessedKeep   time.Duration // how long processed event ids are kept
 	Tick            time.Duration // how often catalog looks around (timeouts, failed publishes)
 
@@ -88,34 +80,26 @@ func Defaults() Config {
 }
 
 // FromLookup builds the Config from any key->value source; get says whether
-// the key is set at all. An empty value counts as "not set", except for
-// CATALOG_NATS_URL, where it means "run without a broker".
+// the key is set at all. An empty value counts as "not set".
 func FromLookup(get func(string) (string, bool)) (Config, error) {
 	l := loader{get: get}
 	cfg := Config{
-		Addr:     l.str(EnvAddr, ":9082"),
-		DBPath:   l.str(EnvDBPath, "data/catalog.db"),
-		Location: l.location(EnvTZ, "Europe/Chisinau"),
+		DBPath:       l.str(EnvDBPath, "data/catalog.db"),
+		Location:     l.location(EnvTZ, "Europe/Chisinau"),
+		PartnersFile: l.str(EnvPartnersFile, "partners.json"),
 
-		NATSURL:      l.optional(EnvNATSURL, "nats://nats:4222"),
-		NATSToken:    l.str(EnvNATSToken, ""),
-		NATSUser:     l.str(EnvNATSUser, ""),
+		NATSURL:      l.str(EnvNATSURL, "nats://nats:4222"),
+		NATSUser:     l.str(EnvNATSUser, "catalog"),
 		NATSPassword: l.str(EnvNATSPassword, ""),
-		NATSStream:   l.str(EnvNATSStream, "FOOD"),
-		NATSDurable:  l.str(EnvNATSDurable, "catalog"),
 
-		AnalysisEnabled: l.boolean(EnvAnalysisEnabled, true),
-		EmbedEnabled:    l.boolean(EnvEmbedEnabled, true),
+		AnalysisEnabled: l.boolean(EnvAnalysisEnabled, false),
+		EmbedEnabled:    l.boolean(EnvEmbedEnabled, false),
 		AnalysisTimeout: l.duration(EnvAnalysisTimeout, 30*time.Minute),
-		ImportEnabled:   l.boolean(EnvImportEnabled, true),
 		ProcessedKeep:   l.duration(EnvProcessedKeep, 30*24*time.Hour),
 		Tick:            l.duration(EnvTick, 30*time.Second),
 
 		AdditionalLogs: l.boolean(EnvAdditionalLogs, false),
 		LogConsole:     l.boolean(EnvLogConsole, false),
-	}
-	if cfg.NATSToken != "" && cfg.NATSUser != "" {
-		l.fail(EnvNATSToken, "set either %s or %s/%s, not both", EnvNATSToken, EnvNATSUser, EnvNATSPassword)
 	}
 	if err := errors.Join(l.errs...); err != nil {
 		return Config{}, fmt.Errorf("config: %w", err)
@@ -134,14 +118,6 @@ func (l *loader) fail(key, format string, args ...any) {
 
 func (l *loader) str(key, def string) string {
 	if v, ok := l.get(key); ok && v != "" {
-		return v
-	}
-	return def
-}
-
-// optional: a key set to "" is kept empty (it turns something off).
-func (l *loader) optional(key, def string) string {
-	if v, ok := l.get(key); ok {
 		return v
 	}
 	return def

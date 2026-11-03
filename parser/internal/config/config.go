@@ -52,12 +52,8 @@ type Config struct {
 	// false = HTTP only (GET /v1/fetch, for debugging).
 	NATSEnabled  bool
 	NATSURL      string
-	NATSToken    string // either a token, or user + password
 	NATSUser     string
 	NATSPassword string
-	// NATSStream is created by core; the parser waits for it.
-	NATSStream  string
-	NATSDurable string
 
 	// AdditionalLogs: also send the detailed debug logs to the logs service
 	// (every request to the site, every dish, every cache decision).
@@ -81,11 +77,8 @@ const (
 
 	EnvNATSEnabled  = "PARSER_NATS_ENABLED"
 	EnvNATSURL      = "PARSER_NATS_URL"
-	EnvNATSToken    = "PARSER_NATS_TOKEN"
 	EnvNATSUser     = "PARSER_NATS_USER"
 	EnvNATSPassword = "PARSER_NATS_PASSWORD"
-	EnvNATSStream   = "PARSER_NATS_STREAM"
-	EnvNATSDurable  = "PARSER_NATS_DURABLE"
 
 	EnvAdditionalLogs = "PARSER_ADDITIONAL_LOGS"
 	EnvLogConsole     = "PARSER_LOG_CONSOLE"
@@ -102,8 +95,6 @@ const (
 	DefaultMinInterval = 10 * time.Minute
 	DefaultRawDir      = "data/raw"
 	DefaultNATSURL     = "nats://nats:4222"
-	DefaultNATSStream  = "FOOD"
-	DefaultNATSDurable = "parser"
 )
 
 // Load reads the configuration. envFile is the path of a .env file; a missing
@@ -139,11 +130,8 @@ func fromLookup(get func(string) string) (Config, error) {
 
 		NATSEnabled:  l.boolean(EnvNATSEnabled, true),
 		NATSURL:      l.str(EnvNATSURL, DefaultNATSURL),
-		NATSToken:    l.str(EnvNATSToken, ""),
-		NATSUser:     l.str(EnvNATSUser, ""),
+		NATSUser:     l.str(EnvNATSUser, "parser"),
 		NATSPassword: l.str(EnvNATSPassword, ""),
-		NATSStream:   l.str(EnvNATSStream, DefaultNATSStream),
-		NATSDurable:  l.str(EnvNATSDurable, DefaultNATSDurable),
 
 		AdditionalLogs: l.boolean(EnvAdditionalLogs, false),
 		LogConsole:     l.boolean(EnvLogConsole, false),
@@ -153,9 +141,6 @@ func fromLookup(get func(string) string) (Config, error) {
 	}
 	if cfg.SiteWeekURL != "" {
 		l.checkURL(EnvSiteWeekURL, cfg.SiteWeekURL)
-	}
-	if cfg.NATSToken != "" && cfg.NATSUser != "" {
-		l.fail(EnvNATSToken, "set either %s or %s/%s, not both", EnvNATSToken, EnvNATSUser, EnvNATSPassword)
 	}
 
 	if err := errors.Join(l.errs...); err != nil {

@@ -1,6 +1,7 @@
 // Command gateway is the way into food-order. It takes HTTP from the bot
 // (later also from the web and the app), checks who calls and for whom, and
-// turns every request into a NATS request to the right service. It holds no
+// turns every request into a NATS request to the right service. It also
+// turns events into messages for people (internal/notify). It holds no
 // business data; the other services cannot be reached from outside.
 //
 // main only starts things: it reads the settings, builds the pieces, joins
@@ -26,8 +27,10 @@ import (
 	"food-order/gateway/internal/applog"
 	"food-order/gateway/internal/config"
 	"food-order/gateway/internal/forward"
+	"food-order/gateway/internal/notify"
 	"food-order/shared/bus"
 	"food-order/shared/rpc"
+	"food-order/shared/streams"
 )
 
 func main() {
@@ -75,13 +78,24 @@ func run(envFile string) error {
 		IdleTimeout:       60 * time.Second,
 	}
 
-	failed := make(chan error, 1)
+	notifier, err := notify.New(nc, client, cfg.RPCTimeout, log.Logger)
+	if err != nil {
+		log.Fatal("cannot start the notifications", "err", err)
+		return err
+	}
+
+	failed := make(chan error, 2)
 	go func() { failed <- srv.ListenAndServe() }()
+	go func() {
+		if err := streams.Consume(ctx, nc, streams.Food, streams.ConsumerNotifier, notifier.Handle, log.Logger); err != nil {
+			failed <- err
+		}
+	}()
 	log.Info("gateway started", "addr", cfg.HTTPAddr)
 
 	select {
 	case err := <-failed:
-		log.Fatal("the HTTP server stopped", "err", err)
+		log.Fatal("the gateway cannot go on", "err", err)
 		return err
 	case <-ctx.Done():
 	}

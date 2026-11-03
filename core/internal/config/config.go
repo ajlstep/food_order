@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -19,19 +18,15 @@ import (
 
 // Variable names.
 const (
-	EnvAddr        = "CORE_ADDR"
-	EnvDBPath      = "CORE_DB_PATH"
-	EnvTZ          = "CORE_TZ"
-	EnvCatalogURL  = "CORE_CATALOG_URL"
-	EnvHTTPTimeout = "CORE_HTTP_TIMEOUT"
+	EnvDBPath     = "CORE_DB_PATH"
+	EnvTZ         = "CORE_TZ"
+	EnvRPCTimeout = "CORE_RPC_TIMEOUT"
 
 	EnvNATSURL      = "CORE_NATS_URL"
-	EnvNATSToken    = "CORE_NATS_TOKEN"
 	EnvNATSUser     = "CORE_NATS_USER"
 	EnvNATSPassword = "CORE_NATS_PASSWORD"
-	EnvNATSStream   = "CORE_NATS_STREAM"
-	EnvNATSDurable  = "CORE_NATS_DURABLE"
-	EnvNATSMaxAge   = "CORE_NATS_MAX_AGE"
+
+	EnvOrderWindow = "CORE_ORDER_WINDOW"
 
 	EnvMenuRequestTime   = "CORE_MENU_REQUEST_TIME"
 	EnvMenuDays          = "CORE_MENU_DAYS"
@@ -91,19 +86,18 @@ type Score struct {
 
 // Config is the complete configuration of core.
 type Config struct {
-	Addr        string
-	DBPath      string
-	Location    *time.Location
-	CatalogURL  string
-	HTTPTimeout time.Duration
+	DBPath     string
+	Location   *time.Location
+	RPCTimeout time.Duration // how long another service may take to answer
 
-	NATSURL      string // empty = run without the broker (HTTP only)
-	NATSToken    string
+	NATSURL      string
 	NATSUser     string
 	NATSPassword string
-	NATSStream   string
-	NATSDurable  string
-	NATSMaxAge   time.Duration
+
+	// OrderWindow: after a person's order time, core still starts the
+	// recommendation for this long (a core that was down at 16:00 and
+	// starts at 16:40 still sends it).
+	OrderWindow time.Duration
 
 	// Menu scheduler.
 	MenuRequestTime   Clock         // daily, ask the menu of the next serving day
@@ -180,24 +174,19 @@ func Defaults() Config {
 }
 
 // FromLookup builds the Config from any key->value source; get says whether
-// the key is set at all. An empty value counts as "not set", except for
-// CORE_NATS_URL, where it means "run without a broker".
+// the key is set at all. An empty value counts as "not set".
 func FromLookup(get func(string) (string, bool)) (Config, error) {
 	l := loader{get: get}
 	cfg := Config{
-		Addr:        l.str(EnvAddr, ":9081"),
-		DBPath:      l.str(EnvDBPath, "data/core.db"),
-		Location:    l.location(EnvTZ, "Europe/Chisinau"),
-		CatalogURL:  strings.TrimRight(l.str(EnvCatalogURL, "http://catalog:9082"), "/"),
-		HTTPTimeout: l.duration(EnvHTTPTimeout, 10*time.Second),
+		DBPath:     l.str(EnvDBPath, "data/core.db"),
+		Location:   l.location(EnvTZ, "Europe/Chisinau"),
+		RPCTimeout: l.duration(EnvRPCTimeout, 5*time.Second),
 
-		NATSURL:      l.optional(EnvNATSURL, "nats://nats:4222"),
-		NATSToken:    l.str(EnvNATSToken, ""),
-		NATSUser:     l.str(EnvNATSUser, ""),
+		NATSURL:      l.str(EnvNATSURL, "nats://nats:4222"),
+		NATSUser:     l.str(EnvNATSUser, "core"),
 		NATSPassword: l.str(EnvNATSPassword, ""),
-		NATSStream:   l.str(EnvNATSStream, "FOOD"),
-		NATSDurable:  l.str(EnvNATSDurable, "core"),
-		NATSMaxAge:   l.duration(EnvNATSMaxAge, 7*24*time.Hour),
+
+		OrderWindow: l.duration(EnvOrderWindow, 2*time.Hour),
 
 		MenuRequestTime:   l.clock(EnvMenuRequestTime, "15:00"),
 		MenuDays:          l.weekdays(EnvMenuDays, "1,2,3,4,5"),
@@ -211,7 +200,7 @@ func FromLookup(get func(string) (string, bool)) (Config, error) {
 		RatingTime:         l.clock(EnvRatingTime, "10:00"),
 		RatingLookbackDays: l.integer(EnvRatingLookback, 3, 1, 60),
 
-		LLMEnabled:           l.boolean(EnvLLMEnabled, true),
+		LLMEnabled:           l.boolean(EnvLLMEnabled, false),
 		LLMTimeout:           l.duration(EnvLLMTimeout, 3*time.Minute),
 		RecCandidates:        l.integer(EnvRecCandidates, 8, 1, 50),
 		RecPicks:             l.integer(EnvRecPicks, 5, 1, 20),
@@ -234,12 +223,6 @@ func FromLookup(get func(string) (string, bool)) (Config, error) {
 	}
 	if cfg.MenuBackoffMax < cfg.MenuBackoff {
 		l.fail(EnvMenuBackoffMax, "must not be smaller than %s", EnvMenuBackoff)
-	}
-	if cfg.NATSToken != "" && cfg.NATSUser != "" {
-		l.fail(EnvNATSToken, "set either %s or %s/%s, not both", EnvNATSToken, EnvNATSUser, EnvNATSPassword)
-	}
-	if u, err := url.Parse(cfg.CatalogURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		l.fail(EnvCatalogURL, "%q is not an http(s) URL", cfg.CatalogURL)
 	}
 	if err := errors.Join(l.errs...); err != nil {
 		return Config{}, fmt.Errorf("config: %w", err)
@@ -264,13 +247,6 @@ func (l *loader) str(key, def string) string {
 }
 
 // optional: a key set to "" is kept empty (it turns something off).
-func (l *loader) optional(key, def string) string {
-	if v, ok := l.get(key); ok {
-		return v
-	}
-	return def
-}
-
 func (l *loader) duration(key string, def time.Duration) time.Duration {
 	v, ok := l.get(key)
 	if !ok || v == "" {

@@ -1,6 +1,9 @@
 services:
+  # recommendations and orders; talks only over NATS (no ports)
   core:
-    build: .
+    build:
+      context: ..                 # project root: the build needs ../shared
+      dockerfile: core/Dockerfile
     image: food_order/core
     container_name: core
     env_file:
@@ -8,8 +11,7 @@ services:
         required: false
     environment:
       CORE_DB_PATH: /data/core.db
-    ports:
-      - "127.0.0.1:9081:9081"
+      CORE_NATS_URL: nats://nats:4222   # in Docker the server is always here, whatever .env says
     volumes:
       - core-data:/data
     networks:

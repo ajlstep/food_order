@@ -3,6 +3,7 @@ package tg
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"net/http"
 	"time"
 
@@ -16,7 +17,7 @@ var allowedUpdates = []string{"message", "callback_query"}
 //
 //	webhook: Telegram makes POST https://<your domain>/tg/webhook for every
 //	         message or button press. The bot needs a public https address
-//	         (reverse proxy -> bot:9084). Telegram keeps the updates for up to
+//	         (reverse proxy -> bot:8086). Telegram keeps the updates for up to
 //	         24 h if the bot is down and sends them when it is back.
 //	polling: the bot asks Telegram (getUpdates) in a loop. No public address
 //	         needed; handy for local runs. Starting it removes the webhook.
@@ -65,6 +66,21 @@ func (b *Bot) RunPolling(ctx context.Context) {
 	b.api.Start(ctx)
 }
 
+// HTTPHandler is the whole HTTP side of the bot: /healthz for Docker and, when
+// webhookPath is not empty, the path Telegram calls. Only that path should
+// be exposed by the proxy.
+func (b *Bot) HTTPHandler(webhookPath, secret string) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	})
+	if webhookPath != "" {
+		mux.Handle(webhookPath, b.WebhookHandler(secret))
+	}
+	return mux
+}
+
 // WebhookHandler is the HTTP handler for the webhook path. It accepts only
 // POST with the right secret header, so nobody else can send fake updates.
 func (b *Bot) WebhookHandler(secret string) http.Handler {
@@ -78,7 +94,7 @@ func (b *Bot) WebhookHandler(secret string) http.Handler {
 		}
 		got := []byte(r.Header.Get("X-Telegram-Bot-Api-Secret-Token"))
 		if subtle.ConstantTimeCompare(got, want) != 1 {
-			b.log.WarnContext(r.Context(), "webhook: wrong secret token", "remote", r.RemoteAddr)
+			b.log.WarnContext(r.Context(), "webhook: wrong secret token")
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}

@@ -25,11 +25,13 @@ import (
 	"food-order/parser/internal/api"
 	"food-order/parser/internal/applog"
 	"food-order/parser/internal/bistro"
-	"food-order/parser/internal/bus"
 	"food-order/parser/internal/config"
-	"food-order/parser/internal/contracts"
 	"food-order/parser/internal/events"
 	"food-order/parser/internal/menu"
+	"food-order/shared/bus"
+	"food-order/shared/contracts/food"
+	sharedevents "food-order/shared/events"
+	"food-order/shared/streams"
 )
 
 func main() {
@@ -47,7 +49,7 @@ func main() {
 		logURL = "" // no broker: the logs go to the console
 	}
 	al := applog.New(applog.Options{
-		Service: "parser", URL: logURL, Token: cfg.NATSToken, User: cfg.NATSUser, Password: cfg.NATSPassword,
+		Service: "parser", URL: logURL, User: cfg.NATSUser, Password: cfg.NATSPassword,
 		Additional: cfg.AdditionalLogs || *debug, Console: cfg.LogConsole,
 	})
 	slog.SetDefault(al.Logger)
@@ -82,24 +84,27 @@ func run(log *slog.Logger, cfg config.Config) error {
 	defer stop() // runs before wg.Wait
 
 	if cfg.NATSEnabled {
-		b, err := bus.Connect(bus.Config{
-			URL: cfg.NATSURL, Token: cfg.NATSToken, User: cfg.NATSUser, Password: cfg.NATSPassword,
-			Stream: cfg.NATSStream, Durable: cfg.NATSDurable,
-		}, log)
+		nc, err := bus.Connect(bus.Options{Name: "parser", URL: cfg.NATSURL, User: cfg.NATSUser, Password: cfg.NATSPassword}, log)
 		if err != nil {
 			return err
 		}
-		defer b.Close()
-		h := events.New(svc, b, cfg.Location, log)
+		defer nc.Close()
+		pub, err := sharedevents.NewPublisher(nc, log)
+		if err != nil {
+			return err
+		}
+		h := events.New(svc, pub, cfg.Location, log)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			err := b.Consume(ctx, contracts.ListenSubjects, h.Handle, nil, func(subject string, err error) {
-				_ = b.Publish(context.Background(), contracts.SubjectAlert, contracts.Alert{
-					Service: "parser", Level: "error", Text: "Răspunsul la " + subject + " nu a putut fi trimis: " + err.Error(),
-				})
-			})
-			if err != nil && !errors.Is(err, context.Canceled) {
+			err := streams.Consume(ctx, nc, streams.Food, streams.ConsumerParser, h.Handle, log,
+				streams.Timeout(streams.ParserTimeout),
+				streams.OnStuck(func(subject string, err error) {
+					_ = pub.Publish(context.Background(), food.SubjectAlert, food.Alert{
+						Service: "parser", Level: "error", Text: "Răspunsul la " + subject + " nu a putut fi trimis: " + err.Error(),
+					})
+				}))
+			if err != nil {
 				errc <- err
 			}
 		}()

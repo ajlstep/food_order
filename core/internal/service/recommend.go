@@ -10,18 +10,20 @@ import (
 	"unicode/utf8"
 
 	"food-order/core/internal/applog"
-	"food-order/core/internal/bus"
-	"food-order/core/internal/contracts"
 	"food-order/core/internal/rules"
 	"food-order/core/internal/store"
+	"food-order/shared/contracts/catalog"
+	contracts "food-order/shared/contracts/core"
+	"food-order/shared/contracts/food"
+	"food-order/shared/events"
 )
 
-// RequestRecommendation is POST /v1/recommendations: the bot asks (at the
-// user's order time, or on /meniu) for the recommendation of a day. If the
+// RequestRecommendation: a person asked (/meniu), or the order time came,
+// for the recommendation of a day. If the
 // menu is ready it is generated now; otherwise it waits for food.menu.ready
 // and core asks for the menu if nobody did. The result goes to the bot as
 // food.recommendation.ready.
-func (s *Service) RequestRecommendation(ctx context.Context, userID int64, date string) (contracts.Recommendation, error) {
+func (s *Service) RequestRecommendation(ctx context.Context, userID string, date string) (contracts.Recommendation, error) {
 	s.Log.InfoContext(ctx, "recommendation requested", "user_id", userID, "date", date)
 	d, err := parseDate("date", date)
 	if err != nil {
@@ -35,7 +37,7 @@ func (s *Service) RequestRecommendation(ctx context.Context, userID int64, date 
 		return contracts.Recommendation{}, badRequest("bad_date", "Ziua %s e prea departe.", date)
 	}
 
-	// one in progress is enough (the bot's scheduler and /meniu may meet)
+	// one in progress is enough (the order time and /meniu may meet)
 	if cur, err := s.Store.LatestRec(ctx, userID, date); err == nil && cur.Status != store.RecReady {
 		s.Log.InfoContext(ctx, "a recommendation is already in progress", "user_id", userID, "date", date, "rec", cur.ID, "status", cur.Status)
 		// but if it waits for a menu nobody is asking for any more (the
@@ -51,7 +53,7 @@ func (s *Service) RequestRecommendation(ctx context.Context, userID int64, date 
 		return contracts.Recommendation{}, err
 	}
 
-	rec, err := s.Store.CreateRec(ctx, userID, date, bus.NewID(s.Now()), s.Now())
+	rec, err := s.Store.CreateRec(ctx, userID, date, events.NewID(s.Now()), s.Now())
 	if err != nil {
 		return contracts.Recommendation{}, err
 	}
@@ -73,8 +75,8 @@ func (s *Service) RequestRecommendation(ctx context.Context, userID int64, date 
 	return s.view(rec), nil
 }
 
-// Recommendation is GET /v1/recommendations?date=: the last one of the day.
-func (s *Service) Recommendation(ctx context.Context, userID int64, date string) (contracts.Recommendation, error) {
+// Recommendation returns the last one of the day.
+func (s *Service) Recommendation(ctx context.Context, userID string, date string) (contracts.Recommendation, error) {
 	if _, err := parseDate("date", date); err != nil {
 		return contracts.Recommendation{}, err
 	}
@@ -109,6 +111,7 @@ func picksView(rec store.Rec) []contracts.Pick {
 		out = append(out, contracts.Pick{
 			DishID: c.DishID, Name: c.Name, Price: c.Price, Reason: p.Reason,
 			KcalMin: c.KcalMin, KcalMax: c.KcalMax, AllergensPossible: c.AllergensPossible,
+			PartnerName: c.PartnerName, OrderUntilMs: c.OrderUntilMs,
 		})
 	}
 	return out
@@ -156,7 +159,7 @@ func (s *Service) generate(ctx context.Context, rec store.Rec) error {
 		})
 	}
 	s.Log.DebugContext(ctx, "llm context", "context", ctxLLM)
-	if err := s.publish(ctx, contracts.SubjectRecommendationRequested, req); err != nil {
+	if err := s.publish(ctx, food.SubjectRecommendationRequested, req); err != nil {
 		s.Log.WarnContext(ctx, "llm request not sent, picks from the score", "err", err)
 		return s.finish(ctx, rec.ID, s.scorePicks(cands)) // no broker: picks from the score
 	}
@@ -165,13 +168,14 @@ func (s *Service) generate(ctx context.Context, rec store.Rec) error {
 }
 
 // candidates is the deterministic part: catalog menu -> hard filters -> score -> top N.
-func (s *Service) candidates(ctx context.Context, userID int64, date string) ([]store.Candidate, error) {
+func (s *Service) candidates(ctx context.Context, userID string, date string) ([]store.Candidate, error) {
 	dishes, err := s.Catalog.Menu(ctx, date)
 	if err != nil {
 		return nil, err
 	}
 	s.Log.DebugContext(ctx, "menu from catalog", "dishes", len(dishes))
-	prefs, err := s.Store.Prefs(ctx, userID)
+	dishes = s.orderable(dishes)
+	prefs, err := s.foodPrefs(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +184,7 @@ func (s *Service) candidates(ctx context.Context, userID int64, date string) ([]
 		return nil, err
 	}
 
-	in := rules.Input{Date: date, Dishes: dishes, Prefs: prefsView(prefs)}
+	in := rules.Input{Date: date, Dishes: dishes, Prefs: prefs}
 	liked := map[int64]bool{}
 	for _, o := range orders {
 		in.History = append(in.History, rules.Past{
@@ -231,6 +235,7 @@ func candidateOf(r rules.Scored) store.Candidate {
 		PortionG: snap.PortionG, KcalMin: snap.KcalMin, KcalMax: snap.KcalMax,
 		ProteinGMin: snap.ProteinGMin, ProteinGMax: snap.ProteinGMax, FatGMin: snap.FatGMin, FatGMax: snap.FatGMax,
 		CarbsGMin: snap.CarbsGMin, CarbsGMax: snap.CarbsGMax, NutritionSource: snap.NutritionSource,
+		PartnerName: d.PartnerName, OrderUntilMs: d.OrderUntilMs,
 	}
 	// only the model's guesses nobody confirmed: the bot asks "contains X?"
 	if d.Allergens.Confirmed == nil && len(d.Allergens.Given) == 0 {
@@ -268,7 +273,7 @@ func (s *Service) notify(ctx context.Context, recID int64) error {
 		return err
 	}
 	ev := contracts.RecommendationReady{UserID: rec.UserID, Date: rec.Date, Picks: picksView(rec)}
-	if err := s.publish(ctx, contracts.SubjectRecommendationReady, ev); err != nil {
+	if err := s.publish(ctx, food.SubjectRecommendationReady, ev); err != nil {
 		return nil // kept for later
 	}
 	s.Log.InfoContext(ctx, "recommendation ready", "rec", rec.ID, "user_id", rec.UserID, "date", rec.Date, "picks", len(ev.Picks))
@@ -313,7 +318,7 @@ func (s *Service) OnRecommendationGenerated(ctx context.Context, ev contracts.Re
 }
 
 // llmContext is the short context for the model: food facts only.
-func (s *Service) llmContext(ctx context.Context, userID int64, date string) (contracts.RecommendationContext, error) {
+func (s *Service) llmContext(ctx context.Context, userID string, date string) (contracts.RecommendationContext, error) {
 	out := contracts.RecommendationContext{
 		MaxPicks: s.Cfg.RecPicks, Recent: []contracts.ContextOrder{}, Liked: []string{}, Disliked: []string{},
 		Likes: []string{}, Avoid: []string{},
@@ -369,7 +374,7 @@ func (s *Service) llmContext(ctx context.Context, userID int64, date string) (co
 		}
 	}
 
-	prefs, err := s.Store.Prefs(ctx, userID)
+	prefs, err := s.foodPrefs(ctx, userID)
 	if err != nil {
 		return out, err
 	}
@@ -403,12 +408,38 @@ func candidateSummary(cands []store.Candidate) []string {
 	return out
 }
 
-func prefsView(ps []store.Pref) []contracts.Pref {
-	out := make([]contracts.Pref, 0, len(ps))
-	for _, p := range ps {
-		out = append(out, contracts.Pref{ID: p.ID, Kind: p.Kind, Value: p.Value, Hard: p.Hard})
+// foodPrefs asks users what the person eats. Allergens are one more kind of
+// preference for the rules, and always a hard filter.
+func (s *Service) foodPrefs(ctx context.Context, userID string) ([]rules.Pref, error) {
+	f, err := s.Users.Food(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]rules.Pref, 0, len(f.Allergens)+len(f.Prefs))
+	for _, a := range f.Allergens {
+		out = append(out, rules.Pref{Kind: rules.KindAllergen, Value: a, Hard: true})
+	}
+	for _, p := range f.Prefs {
+		out = append(out, rules.Pref{Kind: p.Kind, Value: p.Value, Hard: p.Hard})
+	}
+	return out, nil
+}
+
+// orderable keeps the dishes that can still be ordered: a partner that is
+// closed, or whose order time passed, is left out of the recommendation.
+func (s *Service) orderable(dishes []catalog.Dish) []catalog.Dish {
+	out := make([]catalog.Dish, 0, len(dishes))
+	for _, d := range dishes {
+		if !closedFor(d.Closed, d.OrderUntilMs, s.Now()) {
+			out = append(out, d)
+		}
 	}
 	return out
+}
+
+// closedFor is the rule of the order limit, in one place.
+func closedFor(closed bool, untilMs int64, now time.Time) bool {
+	return closed || untilMs > 0 && now.UnixMilli() > untilMs
 }
 
 func nonNil(s []string) []string {

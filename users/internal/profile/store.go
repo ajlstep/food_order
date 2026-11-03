@@ -52,5 +52,8 @@ type Tx interface {
 // Store is the whole store.
 type Store interface {
 	Tx
+	// DueCandidates lists the active people with an active channel, with what
+	// they saved in the settings.
+	DueCandidates(ctx context.Context) ([]DueCandidate, error)
 	InTx(ctx context.Context, fn func(Tx) error) error
 }

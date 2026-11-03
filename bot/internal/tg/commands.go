@@ -2,7 +2,6 @@ package tg
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -11,36 +10,37 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
-	"food-order/bot/internal/contracts"
 	"food-order/bot/internal/services"
+	contracts "food-order/shared/contracts/core"
 )
 
-// Food commands: everything goes to core for the user of the session.
+// Food commands: everything goes to the gateway, for the person of the update.
 
 func (b *Bot) onHelp(ctx context.Context, _ *bot.Bot, _ *models.Update) {
 	b.reply(ctx, helpText)
 }
 
 func (b *Bot) onMenu(ctx context.Context, _ *bot.Bot, _ *models.Update) {
-	s := sessionFrom(ctx)
-	date := b.nextOrderDay(s.settings)
-	if err := b.core.RequestRecommendation(ctx, s.user.ID, date); err != nil {
+	p := personFrom(ctx)
+	date := b.recommendationDay(b.settingsOf(ctx, p))
+	if err := b.users.RequestRecommendation(ctx, p.ExternalID, date); err != nil {
 		b.fail(ctx, "request recommendation", err)
 		return
 	}
-	b.log.InfoContext(ctx, "recommendation requested by the user", "user_id", s.user.ID, "date", date)
+	b.log.InfoContext(ctx, "recommendation requested by the user", "date", date)
 	b.reply(ctx, fmt.Sprintf("⏳ Am cerut recomandarea pentru %s. Îți scriu când e gata.", esc(humanDate(date))))
 }
 
 func (b *Bot) onChoose(ctx context.Context, _ *bot.Bot, u *models.Update) {
-	s := sessionFrom(ctx)
-	date := b.nextOrderDay(s.settings)
+	p := personFrom(ctx)
+	st := b.settingsOf(ctx, p)
+	date := b.recommendationDay(st)
 	if a := strings.ToLower(commandArgs(u)); a == "azi" || a == "today" {
-		date = b.day(s.settings, 0)
+		date = b.day(st, 0)
 	}
-	r, err := b.core.Recommendation(ctx, s.user.ID, date)
+	r, err := b.users.Recommendation(ctx, p.ExternalID, date)
 	switch {
-	case errors.Is(err, services.ErrNotFound):
+	case services.IsNotFound(err):
 		b.reply(ctx, fmt.Sprintf("Nu am recomandare pentru %s. Trimite /meniu.", esc(humanDate(date))))
 		return
 	case err != nil:
@@ -49,7 +49,7 @@ func (b *Bot) onChoose(ctx context.Context, _ *bot.Bot, u *models.Update) {
 	}
 	switch r.Status {
 	case "", "ready":
-		if err := b.showRecommendation(ctx, s.user, date, r.Picks); err != nil {
+		if err := b.showRecommendation(ctx, p, date, r.Picks); err != nil {
 			b.log.ErrorContext(ctx, "send recommendation", "err", err)
 		}
 	case "waiting_menu":
@@ -62,9 +62,10 @@ func (b *Bot) onChoose(ctx context.Context, _ *bot.Bot, u *models.Update) {
 }
 
 func (b *Bot) onRate(ctx context.Context, _ *bot.Bot, _ *models.Update) {
-	s := sessionFrom(ctx)
-	today := b.day(s.settings, 0)
-	orders, err := b.core.Orders(ctx, s.user.ID, b.day(s.settings, -14), today)
+	p := personFrom(ctx)
+	st := b.settingsOf(ctx, p)
+	today := b.day(st, 0)
+	orders, err := b.users.Orders(ctx, p.ExternalID, b.day(st, -14), today)
 	if err != nil {
 		b.fail(ctx, "orders", err)
 		return
@@ -88,12 +89,13 @@ func (b *Bot) onRate(ctx context.Context, _ *bot.Bot, _ *models.Update) {
 }
 
 func (b *Bot) onHistory(ctx context.Context, _ *bot.Bot, u *models.Update) {
-	s := sessionFrom(ctx)
+	p := personFrom(ctx)
+	st := b.settingsOf(ctx, p)
 	days := 30
 	if n, err := strconv.Atoi(commandArgs(u)); err == nil && n > 0 && n <= 366 {
 		days = n
 	}
-	orders, err := b.core.Orders(ctx, s.user.ID, b.day(s.settings, -days), b.day(s.settings, 7))
+	orders, err := b.users.Orders(ctx, p.ExternalID, b.day(st, -days), b.day(st, 7))
 	if err != nil {
 		b.fail(ctx, "orders", err)
 		return
@@ -107,42 +109,16 @@ func (b *Bot) onHistory(ctx context.Context, _ *bot.Bot, u *models.Update) {
 	b.reply(ctx, historyText(orders, 15))
 }
 
-func (b *Bot) onPrefs(ctx context.Context, _ *bot.Bot, u *models.Update) {
-	s := sessionFrom(ctx)
-	cur, err := b.core.Prefs(ctx, s.user.ID)
-	if err != nil {
-		b.fail(ctx, "prefs", err)
-		return
-	}
-	next, changed, err := applyPrefsCommand(cur, commandArgs(u))
-	if errors.Is(err, errPrefsUsage) {
-		b.log.InfoContext(ctx, "prefs command not understood", "args", commandArgs(u))
-		b.reply(ctx, "Nu am înțeles.\n\n"+prefsHelp)
-		return
-	}
-	if changed {
-		if err := b.core.SetPrefs(ctx, s.user.ID, next); err != nil {
-			b.fail(ctx, "set prefs", err)
-			return
-		}
-		b.log.InfoContext(ctx, "prefs changed", "user_id", s.user.ID, "before", len(cur.Items), "after", len(next.Items), "items", next.Items)
-		// read back, so the numbers in the list are the ones core has now
-		if fresh, err := b.core.Prefs(ctx, s.user.ID); err == nil {
-			next = fresh
-		}
-	}
-	b.reply(ctx, prefsText(next))
-}
-
 func (b *Bot) onStats(ctx context.Context, _ *bot.Bot, u *models.Update) {
-	s := sessionFrom(ctx)
-	today := b.today(s.settings)
+	p := personFrom(ctx)
+	settings := b.settingsOf(ctx, p)
+	today := b.today(settings)
 	from := today.AddDate(0, 0, -today.Day()+1).Format(dateLayout) // 1st of the month
 	if n, err := strconv.Atoi(commandArgs(u)); err == nil && n > 0 && n <= 366 {
-		from = b.day(s.settings, -(n - 1))
+		from = b.day(settings, -(n - 1))
 	}
 	to := today.Format(dateLayout)
-	st, err := b.core.Stats(ctx, s.user.ID, from, to)
+	st, err := b.users.Stats(ctx, p.ExternalID, from, to)
 	if err != nil {
 		b.fail(ctx, "stats", err)
 		return
@@ -175,16 +151,16 @@ func (b *Bot) onText(ctx context.Context, _ *bot.Bot, u *models.Update) {
 		return
 	}
 	if !strings.HasPrefix(text, "/") {
-		if p := b.takePending(sessionFrom(ctx).user.ID); p != nil {
+		if p := b.takePending(personFrom(ctx).UserID); p != nil {
 			b.submitRating(ctx, p.orderID, p.rating, text)
 			return
 		}
 	}
-	b.log.DebugContext(ctx, "text not understood, help sent", "text", cutText(text, 200))
+	b.log.DebugContext(ctx, "text not understood, help sent")
 	b.reply(ctx, helpText)
 }
 
-func (b *Bot) takePending(userID int64) *pendingRating {
+func (b *Bot) takePending(userID string) *pendingRating {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	p := b.pending[userID]
@@ -196,11 +172,10 @@ func (b *Bot) takePending(userID int64) *pendingRating {
 }
 
 func (b *Bot) submitRating(ctx context.Context, orderID int64, rating int, comment string) {
-	s := sessionFrom(ctx)
-	if err := b.core.Rate(ctx, s.user.ID, orderID, contracts.RatingRequest{Rating: rating, Comment: comment}); err != nil {
+	if err := b.users.Rate(ctx, personFrom(ctx).ExternalID, orderID, rating, comment); err != nil {
 		b.fail(ctx, "rate", err)
 		return
 	}
-	b.log.InfoContext(ctx, "rating saved", "user_id", s.user.ID, "order", orderID, "rating", rating, "comment", comment)
+	b.log.InfoContext(ctx, "rating saved", "order", orderID, "rating", rating)
 	b.reply(ctx, fmt.Sprintf("✅ Am salvat nota %d⭐. Mulțumesc!", rating))
 }

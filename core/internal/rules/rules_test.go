@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"food-order/core/internal/config"
-	"food-order/core/internal/contracts"
+	"food-order/shared/contracts/catalog"
 )
 
 func f(v float64) *float64 { return &v }
@@ -35,15 +35,15 @@ func TestNorm(t *testing.T) {
 
 func TestAllergenFilter(t *testing.T) {
 	confirmedNone := []string{}
-	dishes := []contracts.CatalogDish{
+	dishes := []catalog.Dish{
 		{ID: 1, Name: "Supă de legume"},
-		{ID: 2, Name: "Paste carbonara", Components: []contracts.CatalogComponent{{Name: "smântână"}}},
-		{ID: 3, Name: "Pui la grătar", Allergens: contracts.CatalogAllergens{Given: []string{"lactate"}}},
-		{ID: 4, Name: "Salată", Allergens: contracts.CatalogAllergens{Possible: []string{"lapte"}}},
-		{ID: 5, Name: "Orez", Allergens: contracts.CatalogAllergens{Possible: []string{"lapte"}, Confirmed: &confirmedNone}},
+		{ID: 2, Name: "Paste carbonara", Components: []catalog.DishComponent{{Name: "smântână"}}},
+		{ID: 3, Name: "Pui la grătar", Allergens: catalog.Allergens{Given: []string{"lactate"}}},
+		{ID: 4, Name: "Salată", Allergens: catalog.Allergens{Possible: []string{"lapte"}}},
+		{ID: 5, Name: "Orez", Allergens: catalog.Allergens{Possible: []string{"lapte"}, Confirmed: &confirmedNone}},
 		{ID: 6, Name: "Сырники со сметаной"},
 	}
-	res := Rank(Input{Date: "2026-10-30", Dishes: dishes, Prefs: []contracts.Pref{{Kind: KindAllergen, Value: "Lapte", Hard: true}}}, cfg())
+	res := Rank(Input{Date: "2026-10-30", Dishes: dishes, Prefs: []Pref{{Kind: KindAllergen, Value: "Lapte", Hard: true}}}, cfg())
 	got := map[int64]bool{}
 	for _, id := range ids(res) {
 		got[id] = true
@@ -65,13 +65,13 @@ func TestEffectiveAllergens(t *testing.T) {
 	none := []string{}
 	nuts := []string{"nuci"}
 	cases := []struct {
-		a    contracts.CatalogAllergens
+		a    catalog.Allergens
 		want int
 	}{
-		{contracts.CatalogAllergens{Possible: []string{"a", "b"}}, 2},
-		{contracts.CatalogAllergens{Given: []string{"a"}, Possible: []string{"b", "c"}}, 1},
-		{contracts.CatalogAllergens{Possible: []string{"a"}, Confirmed: &none}, 0},
-		{contracts.CatalogAllergens{Given: []string{"a"}, Confirmed: &nuts}, 2},
+		{catalog.Allergens{Possible: []string{"a", "b"}}, 2},
+		{catalog.Allergens{Given: []string{"a"}, Possible: []string{"b", "c"}}, 1},
+		{catalog.Allergens{Possible: []string{"a"}, Confirmed: &none}, 0},
+		{catalog.Allergens{Given: []string{"a"}, Confirmed: &nuts}, 2},
 	}
 	for n, c := range cases {
 		if got := EffectiveAllergens(c.a); len(got) != c.want {
@@ -81,24 +81,24 @@ func TestEffectiveAllergens(t *testing.T) {
 }
 
 func TestHardDislikeAndDiet(t *testing.T) {
-	dishes := []contracts.CatalogDish{
+	dishes := []catalog.Dish{
 		{ID: 1, Name: "Cartofi prăjiți"},
-		{ID: 2, Name: "Pește", Components: []contracts.CatalogComponent{{Name: "pește", Method: "fried"}}},
+		{ID: 2, Name: "Pește", Components: []catalog.DishComponent{{Name: "pește", Method: "fried"}}},
 		{ID: 3, Name: "Ciuperci la cuptor", Tags: []string{"vegetarian"}},
 		{ID: 4, Name: "Legume la abur", Tags: []string{"vegetarian"}},
 	}
-	prefs := []contracts.Pref{{Kind: KindDislike, Value: "prăjit", Hard: true}, {Kind: KindDislike, Value: "ciuperci", Hard: true}}
+	prefs := []Pref{{Kind: KindDislike, Value: "prăjit", Hard: true}, {Kind: KindDislike, Value: "ciuperci", Hard: true}}
 	if got := ids(Rank(Input{Date: "2026-10-30", Dishes: dishes, Prefs: prefs}, cfg())); len(got) != 1 || got[0] != 4 {
 		t.Errorf("only dish 4 must stay, got %v", got)
 	}
-	diet := []contracts.Pref{{Kind: KindDiet, Value: "vegetarian", Hard: true}}
+	diet := []Pref{{Kind: KindDiet, Value: "vegetarian", Hard: true}}
 	if got := ids(Rank(Input{Date: "2026-10-30", Dishes: dishes, Prefs: diet}, cfg())); len(got) != 2 {
 		t.Errorf("hard diet keeps only the vegetarian ones, got %v", got)
 	}
 }
 
 func TestScoreOrder(t *testing.T) {
-	dishes := []contracts.CatalogDish{{ID: 1, Name: "Zeamă"}, {ID: 2, Name: "Pilaf"}, {ID: 3, Name: "Sarmale"}}
+	dishes := []catalog.Dish{{ID: 1, Name: "Zeamă"}, {ID: 2, Name: "Pilaf"}, {ID: 3, Name: "Sarmale"}}
 	hist := []Past{
 		{DishID: 3, Date: "2026-10-01", Rating: i(5)},
 		{DishID: 3, Date: "2026-10-08", Rating: i(5)},
@@ -126,21 +126,21 @@ func TestScoreOrder(t *testing.T) {
 }
 
 func TestSoftPrefs(t *testing.T) {
-	dishes := []contracts.CatalogDish{{ID: 1, Name: "Supă de pui"}, {ID: 2, Name: "Supă de vită"}}
-	res := Rank(Input{Date: "2026-10-30", Dishes: dishes, Prefs: []contracts.Pref{{Kind: KindLike, Value: "vită"}}}, cfg())
+	dishes := []catalog.Dish{{ID: 1, Name: "Supă de pui"}, {ID: 2, Name: "Supă de vită"}}
+	res := Rank(Input{Date: "2026-10-30", Dishes: dishes, Prefs: []Pref{{Kind: KindLike, Value: "vită"}}}, cfg())
 	if ids(res)[0] != 2 {
 		t.Errorf("like: %v", ids(res))
 	}
-	res = Rank(Input{Date: "2026-10-30", Dishes: dishes, Prefs: []contracts.Pref{{Kind: KindDislike, Value: "pui"}}}, cfg())
+	res = Rank(Input{Date: "2026-10-30", Dishes: dishes, Prefs: []Pref{{Kind: KindDislike, Value: "pui"}}}, cfg())
 	if ids(res)[0] != 2 || len(res.Ranked) != 2 {
 		t.Errorf("soft dislike only lowers: %v", ids(res))
 	}
 }
 
 func TestTarget(t *testing.T) {
-	near := contracts.CatalogDish{ID: 1, Name: "a", NutritionSource: "llm", Nutrition: &contracts.CatalogNutrition{Kcal: &contracts.Range{Min: 650, Max: 750}}}
-	far := contracts.CatalogDish{ID: 2, Name: "b", NutritionSource: "llm", Nutrition: &contracts.CatalogNutrition{Kcal: &contracts.Range{Min: 1200, Max: 1400}}}
-	none := contracts.CatalogDish{ID: 3, Name: "c"}
+	near := catalog.Dish{ID: 1, Name: "a", NutritionSource: "llm", Nutrition: &catalog.Nutrition{Kcal: &catalog.Range{Min: 650, Max: 750}}}
+	far := catalog.Dish{ID: 2, Name: "b", NutritionSource: "llm", Nutrition: &catalog.Nutrition{Kcal: &catalog.Range{Min: 1200, Max: 1400}}}
+	none := catalog.Dish{ID: 3, Name: "c"}
 	tg := map[string]float64{"kcal": 700}
 	if v := targetFit(near, tg, "mid"); v != 1 {
 		t.Errorf("near mid = %v", v)

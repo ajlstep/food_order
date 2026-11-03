@@ -1,278 +1,179 @@
-// Package api is core's HTTP API (port 9081), called by the bot. Every
-// /v1 call carries the user in the header X-User-ID (users.id from bot.db);
-// without it the answer is 400. Errors: {"error": {"code", "message"}}.
+// Package api says which subject is answered by which function: the doorway
+// of core. It reads the message, calls the service and shapes the answer.
+// The person is the one in the envelope, put there by the gateway.
 package api
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"io"
 	"log/slog"
-	"net/http"
-	"strconv"
 	"time"
 
-	"food-order/core/internal/applog"
-	"food-order/core/internal/bus"
-	"food-order/core/internal/contracts"
 	"food-order/core/internal/service"
+	"food-order/shared/contracts/core"
+	"food-order/shared/rpc"
 )
 
-// Pinger checks the database for /healthz.
-type Pinger interface {
-	Ping(ctx context.Context) error
-}
-
-// New returns the handler with every route.
-func New(svc *service.Service, db Pinger, log *slog.Logger) http.Handler {
-	a := &api{svc: svc, log: log}
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-		defer cancel()
-		if err := db.Ping(ctx); err != nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "db_unavailable"})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-	})
-	mux.HandleFunc("POST /v1/recommendations", a.user(a.createRecommendation))
-	mux.HandleFunc("GET /v1/recommendations", a.user(a.getRecommendation))
-	mux.HandleFunc("POST /v1/orders", a.user(a.createOrder))
-	mux.HandleFunc("POST /v1/orders/{id}/rating", a.user(a.rate))
-	mux.HandleFunc("GET /v1/orders", a.user(a.orders))
-	mux.HandleFunc("GET /v1/prefs", a.user(a.prefs))
-	mux.HandleFunc("PUT /v1/prefs", a.user(a.setPrefs))
-	mux.HandleFunc("GET /v1/stats", a.user(a.stats))
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, http.StatusNotFound, "not_found", "Nu există așa ceva.")
-	})
-	return a.logRequests(mux)
-}
-
-type api struct {
+// Handlers answers the requests of core.
+type Handlers struct {
 	svc *service.Service
-	log *slog.Logger
 }
 
-type userHandler func(w http.ResponseWriter, r *http.Request, userID int64)
+// New makes the handlers.
+func New(svc *service.Service) *Handlers { return &Handlers{svc: svc} }
 
-// user reads X-User-ID; core has no users table: a new id simply appears.
-func (a *api) user(h userHandler) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		v := r.Header.Get(contracts.HeaderUserID)
-		id, err := strconv.ParseInt(v, 10, 64)
-		if v == "" || err != nil || id <= 0 {
-			a.log.WarnContext(r.Context(), "request without a valid X-User-ID", "value", v)
-			writeError(w, http.StatusBadRequest, "missing_user", "Lipsește antetul X-User-ID (id-ul utilizatorului din bot).")
-			return
+// Routes is every subject with its handler, traced.
+func (h *Handlers) Routes(log *slog.Logger) map[string]rpc.Handler {
+	routes := map[string]rpc.Handler{
+		core.SubjectRecommendationCreate: h.createRecommendation,
+		core.SubjectRecommendationGet:    h.getRecommendation,
+		core.SubjectOrderCreate:          h.createOrder,
+		core.SubjectOrderRate:            h.rate,
+		core.SubjectOrdersList:           h.orders,
+		core.SubjectStats:                h.stats,
+		core.SubjectCompanyReport:        h.companyReport,
+	}
+	for subject, handler := range routes {
+		routes[subject] = traced(log, subject, handler)
+	}
+	return routes
+}
+
+// Register connects the routes to the server.
+func (h *Handlers) Register(srv *rpc.Server, log *slog.Logger) error {
+	for subject, handler := range h.Routes(log) {
+		if err := srv.Handle(subject, handler); err != nil {
+			return err
 		}
-		h(w, r, id)
 	}
+	return nil
 }
 
-func (a *api) createRecommendation(w http.ResponseWriter, r *http.Request, userID int64) {
-	var in contracts.CreateRecommendationRequest
-	if !readJSON(w, r, &in) {
-		return
+// who returns the person of the request, or a bad_request if there is none.
+func who(req rpc.Request) (string, error) {
+	if req.UserID == "" {
+		return "", rpc.NewError(rpc.CodeBadRequest, "the request has no user_id")
 	}
-	rec, err := a.svc.RequestRecommendation(r.Context(), userID, in.Date)
-	if a.fail(w, err) {
-		return
-	}
-	writeJSON(w, http.StatusAccepted, rec)
+	return req.UserID, nil
 }
 
-func (a *api) getRecommendation(w http.ResponseWriter, r *http.Request, userID int64) {
-	rec, err := a.svc.Recommendation(r.Context(), userID, r.URL.Query().Get("date"))
-	if a.fail(w, err) {
-		return
+func (h *Handlers) createRecommendation(ctx context.Context, req rpc.Request) (any, error) {
+	id, err := who(req)
+	if err != nil {
+		return nil, err
 	}
-	writeJSON(w, http.StatusOK, rec)
+	var in core.CreateRecommendationRequest
+	if err := rpc.Decode(req, &in); err != nil {
+		return nil, err
+	}
+	out, err := h.svc.RequestRecommendation(ctx, id, in.Date)
+	return out, answer(err)
 }
 
-func (a *api) createOrder(w http.ResponseWriter, r *http.Request, userID int64) {
-	var in contracts.CreateOrderRequest
-	if !readJSON(w, r, &in) {
-		return
+func (h *Handlers) getRecommendation(ctx context.Context, req rpc.Request) (any, error) {
+	id, err := who(req)
+	if err != nil {
+		return nil, err
 	}
-	o, err := a.svc.CreateOrder(r.Context(), userID, in)
-	if a.fail(w, err) {
-		return
+	var in core.GetRecommendationRequest
+	if err := rpc.Decode(req, &in); err != nil {
+		return nil, err
 	}
-	writeJSON(w, http.StatusOK, o)
+	out, err := h.svc.Recommendation(ctx, id, in.Date)
+	return out, answer(err)
 }
 
-func (a *api) rate(w http.ResponseWriter, r *http.Request, userID int64) {
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil || id <= 0 {
-		writeError(w, http.StatusBadRequest, "bad_id", "Id-ul comenzii nu e un număr.")
-		return
+func (h *Handlers) createOrder(ctx context.Context, req rpc.Request) (any, error) {
+	id, err := who(req)
+	if err != nil {
+		return nil, err
 	}
-	var in contracts.RatingRequest
-	if !readJSON(w, r, &in) {
-		return
+	var in core.CreateOrderRequest
+	if err := rpc.Decode(req, &in); err != nil {
+		return nil, err
 	}
-	o, err := a.svc.Rate(r.Context(), userID, id, in)
-	if a.fail(w, err) {
-		return
+	out, err := h.svc.CreateOrder(ctx, id, in)
+	return out, answer(err)
+}
+
+func (h *Handlers) rate(ctx context.Context, req rpc.Request) (any, error) {
+	id, err := who(req)
+	if err != nil {
+		return nil, err
 	}
-	writeJSON(w, http.StatusOK, o)
-}
-
-func (a *api) orders(w http.ResponseWriter, r *http.Request, userID int64) {
-	q := r.URL.Query()
-	out, err := a.svc.Orders(r.Context(), userID, q.Get("from"), q.Get("to"))
-	if a.fail(w, err) {
-		return
+	var in core.RateRequest
+	if err := rpc.Decode(req, &in); err != nil {
+		return nil, err
 	}
-	writeJSON(w, http.StatusOK, out)
+	out, err := h.svc.Rate(ctx, id, in)
+	return out, answer(err)
 }
 
-func (a *api) prefs(w http.ResponseWriter, r *http.Request, userID int64) {
-	out, err := a.svc.Prefs(r.Context(), userID)
-	if a.fail(w, err) {
-		return
+func (h *Handlers) orders(ctx context.Context, req rpc.Request) (any, error) {
+	id, err := who(req)
+	if err != nil {
+		return nil, err
 	}
-	writeJSON(w, http.StatusOK, out)
-}
-
-func (a *api) setPrefs(w http.ResponseWriter, r *http.Request, userID int64) {
-	var in contracts.Prefs
-	if !readJSON(w, r, &in) {
-		return
+	var in core.PeriodRequest
+	if err := rpc.Decode(req, &in); err != nil {
+		return nil, err
 	}
-	out, err := a.svc.SetPrefs(r.Context(), userID, in)
-	if a.fail(w, err) {
-		return
+	out, err := h.svc.Orders(ctx, id, in.From, in.To)
+	return core.OrdersResponse{Items: out}, answer(err)
+}
+
+func (h *Handlers) stats(ctx context.Context, req rpc.Request) (any, error) {
+	id, err := who(req)
+	if err != nil {
+		return nil, err
 	}
-	writeJSON(w, http.StatusOK, out)
-}
-
-func (a *api) stats(w http.ResponseWriter, r *http.Request, userID int64) {
-	q := r.URL.Query()
-	out, err := a.svc.Stats(r.Context(), userID, q.Get("from"), q.Get("to"))
-	if a.fail(w, err) {
-		return
+	var in core.PeriodRequest
+	if err := rpc.Decode(req, &in); err != nil {
+		return nil, err
 	}
-	writeJSON(w, http.StatusOK, out)
+	out, err := h.svc.Stats(ctx, id, in.From, in.To)
+	return out, answer(err)
 }
 
-// fail writes the error answer; it returns true if there was an error.
-func (a *api) fail(w http.ResponseWriter, err error) bool {
-	return a.failCtx(context.Background(), w, err)
-}
-
-func (a *api) failCtx(ctx context.Context, w http.ResponseWriter, err error) bool {
-	if err == nil {
-		return false
+func (h *Handlers) companyReport(ctx context.Context, req rpc.Request) (any, error) {
+	id, err := who(req)
+	if err != nil {
+		return nil, err
 	}
-	if sw, ok := w.(*statusWriter); ok {
-		ctx = sw.ctx
+	var in core.PeriodRequest
+	if err := rpc.Decode(req, &in); err != nil {
+		return nil, err
 	}
-	var se *service.Error
-	if errors.As(err, &se) {
-		a.log.InfoContext(ctx, "request refused", "status", se.Status, "code", se.Code, "message", se.Message)
-		writeError(w, se.Status, se.Code, se.Message)
-		return true
+	out, err := h.svc.CompanyReport(ctx, id, in.From, in.To)
+	return out, answer(err)
+}
+
+// answer turns a refusal of the service into what crosses the wire, with
+// the words for the person. Any other error stays as it is: rpc.Server logs
+// it and answers only "internal".
+func answer(err error) error {
+	var refused *service.Error
+	if errors.As(err, &refused) {
+		return rpc.Refuse(refused.Code, refused.Message)
 	}
-	a.log.ErrorContext(ctx, "request failed", "err", err)
-	writeError(w, http.StatusInternalServerError, "internal", "Eroare internă în core.")
-	return true
+	return err
 }
 
-func readJSON(w http.ResponseWriter, r *http.Request, out any) bool {
-	dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
-	if err := dec.Decode(out); err != nil {
-		if sw, ok := w.(*statusWriter); ok {
-			sw.log.WarnContext(sw.ctx, "request body is not valid JSON", "err", err)
-		}
-		writeError(w, http.StatusBadRequest, "bad_json", "Corpul cererii nu e JSON valid.")
-		return false
-	}
-	return true
-}
-
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-func writeError(w http.ResponseWriter, status int, code, msg string) {
-	writeJSON(w, status, contracts.ErrorBody{Error: contracts.ErrorDetail{Code: code, Message: msg}})
-}
-
-type statusWriter struct {
-	http.ResponseWriter
-	status int
-	bytes  int
-	ctx    context.Context // the request context with its log fields
-	log    *slog.Logger
-}
-
-func (s *statusWriter) WriteHeader(code int) {
-	s.status = code
-	s.ResponseWriter.WriteHeader(code)
-}
-
-func (s *statusWriter) Write(b []byte) (int, error) {
-	n, err := s.ResponseWriter.Write(b)
-	s.bytes += n
-	return n, err
-}
-
-// logRequests gives every request an id and its fields in the context
-// (req_id, method, path, user_id), so every log of the request carries
-// them, and logs the request itself: info for the calls of a user, error
-// for a 5xx, debug for /healthz. The body is in the debug log.
-func (a *api) logRequests(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// traced writes a debug record for every request: what, how long, how it
+// ended. The data stays out: a rating has a free comment in it.
+func traced(log *slog.Logger, subject string, next rpc.Handler) rpc.Handler {
+	return func(ctx context.Context, req rpc.Request) (any, error) {
 		start := time.Now()
-		reqID := r.Header.Get("X-Request-ID")
-		if reqID == "" {
-			reqID = bus.NewID(start)
-		}
-		ctx := applog.With(r.Context(), "req_id", reqID, "http_method", r.Method, "http_path", r.URL.Path)
-		if u := r.Header.Get(contracts.HeaderUserID); u != "" {
-			ctx = applog.With(ctx, "user_id", u)
-		}
-		var body []byte
-		if r.Body != nil && r.ContentLength != 0 && a.log.Enabled(ctx, slog.LevelDebug) {
-			body, _ = io.ReadAll(io.LimitReader(r.Body, 1<<20))
-			r.Body = io.NopCloser(bytes.NewReader(body))
-		}
-		r = r.WithContext(ctx)
-		w.Header().Set("X-Request-ID", reqID)
-		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK, ctx: ctx, log: a.log}
-		a.log.DebugContext(ctx, "http request", "query", r.URL.RawQuery, "remote", r.RemoteAddr,
-			"user_agent", r.UserAgent(), "body", bodyForLog(body))
-		next.ServeHTTP(sw, r)
-		args := []any{"status", sw.status, "ms", applog.Since(start), "bytes", sw.bytes, "query", r.URL.RawQuery}
+		data, err := next(ctx, req)
+		outcome := "ok"
+		var re *rpc.Error
 		switch {
-		case r.URL.Path == "/healthz":
-			a.log.DebugContext(ctx, "http", args...)
-		case sw.status >= 500:
-			a.log.ErrorContext(ctx, "http", args...)
-		case sw.status >= 400:
-			a.log.WarnContext(ctx, "http", args...)
-		default:
-			a.log.InfoContext(ctx, "http", args...)
+		case errors.As(err, &re):
+			outcome = re.Code
+		case err != nil:
+			outcome = "failed"
 		}
-	})
-}
-
-func bodyForLog(b []byte) any {
-	if len(b) == 0 {
-		return nil
+		log.DebugContext(ctx, "rpc handled", "subject", subject, "outcome", outcome, "ms", time.Since(start).Milliseconds())
+		return data, err
 	}
-	if len(b) > 8<<10 {
-		return string(b[:8<<10]) + "…"
-	}
-	if json.Valid(b) {
-		return json.RawMessage(b)
-	}
-	return string(b)
 }

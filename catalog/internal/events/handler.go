@@ -8,9 +8,11 @@ import (
 	"errors"
 	"fmt"
 
-	"food-order/catalog/internal/bus"
-	"food-order/catalog/internal/contracts"
 	"food-order/catalog/internal/service"
+	contracts "food-order/shared/contracts/catalog"
+	"food-order/shared/contracts/food"
+	"food-order/shared/events"
+	"food-order/shared/streams"
 )
 
 // Handler handles one raw event.
@@ -21,15 +23,11 @@ type Handler struct {
 // New makes a Handler.
 func New(svc *service.Service) *Handler { return &Handler{Svc: svc} }
 
-// Handle processes one event. nil = ack; bus.ErrPermanent = drop; other
-// errors = redeliver later.
-func (h *Handler) Handle(ctx context.Context, subject string, raw []byte) error {
-	var env contracts.Envelope
+// Handle processes one event; it is a streams.Handler.
+func (h *Handler) Handle(ctx context.Context, raw []byte) error {
+	var env events.Envelope
 	if err := json.Unmarshal(raw, &env); err != nil {
-		return fmt.Errorf("%w: envelope: %v", bus.ErrPermanent, err)
-	}
-	if env.Type == "" {
-		env.Type = subject
+		return fmt.Errorf("%w: envelope: %v", streams.ErrDrop, err)
 	}
 	st := h.Svc.Store
 	if env.ID != "" {
@@ -45,12 +43,12 @@ func (h *Handler) Handle(ctx context.Context, subject string, raw []byte) error 
 
 	var err error
 	switch env.Type {
-	case contracts.SubjectMenuFetched:
+	case food.SubjectMenuFetched:
 		var d contracts.MenuFetched
 		if err = decode(env, &d); err == nil {
 			_, err = h.Svc.Import(ctx, d)
 		}
-	case contracts.SubjectDishAnalyzed:
+	case food.SubjectDishAnalyzed:
 		var d contracts.DishAnalyzed
 		if err = decode(env, &d); err == nil {
 			err = need(d.MenuItemID > 0, "menu_item_id is required")
@@ -58,7 +56,7 @@ func (h *Handler) Handle(ctx context.Context, subject string, raw []byte) error 
 		if err == nil {
 			err = h.Svc.OnAnalyzed(ctx, d)
 		}
-	case contracts.SubjectDishEmbedded:
+	case food.SubjectDishEmbedded:
 		var d contracts.DishEmbedded
 		if err = decode(env, &d); err == nil {
 			err = need(d.DishID > 0, "dish_id is required")
@@ -67,12 +65,12 @@ func (h *Handler) Handle(ctx context.Context, subject string, raw []byte) error 
 			err = h.Svc.OnEmbedded(ctx, d)
 		}
 	default:
-		return fmt.Errorf("%w: unknown event type %q", bus.ErrPermanent, env.Type)
+		return fmt.Errorf("%w: unknown event type %q", streams.ErrDrop, env.Type)
 	}
 	if err != nil {
 		var se *service.Error
 		if errors.As(err, &se) {
-			return fmt.Errorf("%w: %s: %v", bus.ErrPermanent, env.Type, err)
+			return fmt.Errorf("%w: %s: %v", streams.ErrDrop, env.Type, err)
 		}
 		return err
 	}
@@ -82,16 +80,16 @@ func (h *Handler) Handle(ctx context.Context, subject string, raw []byte) error 
 	return nil
 }
 
-func decode(env contracts.Envelope, out any) error {
+func decode(env events.Envelope, out any) error {
 	if err := json.Unmarshal(env.Data, out); err != nil {
-		return fmt.Errorf("%w: %s data: %v", bus.ErrPermanent, env.Type, err)
+		return fmt.Errorf("%w: %s data: %v", streams.ErrDrop, env.Type, err)
 	}
 	return nil
 }
 
 func need(ok bool, msg string) error {
 	if !ok {
-		return fmt.Errorf("%w: %s", bus.ErrPermanent, msg)
+		return fmt.Errorf("%w: %s", streams.ErrDrop, msg)
 	}
 	return nil
 }

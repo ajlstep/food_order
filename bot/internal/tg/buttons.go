@@ -10,14 +10,14 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
-	"food-order/bot/internal/contracts"
+	contracts "food-order/shared/contracts/core"
 )
 
 // onButton handles every inline button. What a button means is in its
-// callback_data (see callback.go); the user comes from the session.
+// callback_data (see callback.go); the person comes from the context.
 func (b *Bot) onButton(ctx context.Context, api *bot.Bot, u *models.Update) {
 	q := u.CallbackQuery
-	s := sessionFrom(ctx)
+	p := personFrom(ctx)
 	answer := func(text string) {
 		_, _ = api.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: q.ID, Text: text})
 	}
@@ -37,22 +37,27 @@ func (b *Bot) onButton(ctx context.Context, api *bot.Bot, u *models.Update) {
 	}
 
 	switch cb.Kind {
-	case kindDay, kindTime:
-		b.settingsButton(ctx, api, q, cb)
+	case kindDay, kindTime, kindToggle:
+		b.settingsButton(ctx, api, q, cb, answer)
 
-	case kindInvite, kindKick, kindLeave:
-		b.groupButton(ctx, q, cb, answer, clear)
+	case kindResend, kindOtherEmail: // a button left from the sign-up
+		answer("Emailul e deja confirmat")
+		clear()
+
+	case kindInviteYes, kindInviteNo, kindKickCompany, kindKickGroup:
+		b.orgButton(ctx, cb, answer, clear)
 
 	case kindOrder:
-		if cb.Date < b.day(s.settings, 0) {
+		st := b.settingsOf(ctx, p)
+		if cb.Date < b.day(st, 0) {
 			b.log.InfoContext(ctx, "order button of a past day", "date", cb.Date, "dish_id", cb.DishID)
 			answer("Recomandarea a expirat")
 			clear()
 			b.reply(ctx, "Recomandarea asta e pentru o zi trecută. Trimite /alege pentru cea de acum.")
 			return
 		}
-		o, err := b.core.CreateOrder(ctx, s.user.ID, contracts.CreateOrderRequest{
-			Date: cb.Date, DishID: cb.DishID, Price: cb.Price, Forced: cb.Forced,
+		o, err := b.users.CreateOrder(ctx, p.ExternalID, contracts.CreateOrderRequest{
+			Date: cb.Date, DishID: cb.DishID, Price: cb.Price, Forced: cb.Forced, Personal: st.Personal(),
 		})
 		if err != nil {
 			answer("Nu a mers")
@@ -71,7 +76,7 @@ func (b *Bot) onButton(ctx context.Context, api *bot.Bot, u *models.Update) {
 		if cb.Forced {
 			forced = " (din lipsă)"
 		}
-		b.reply(ctx, fmt.Sprintf("✅ Ai ales pentru %s: <b>%s</b>%s.", esc(humanDate(cb.Date)), esc(name), forced))
+		b.reply(ctx, fmt.Sprintf("✅ Ai ales pentru %s: <b>%s</b>%s.%s", esc(humanDate(cb.Date)), esc(name), forced, destinationText(o)))
 
 	case kindForced:
 		answer("")
@@ -89,7 +94,7 @@ func (b *Bot) onButton(ctx context.Context, api *bot.Bot, u *models.Update) {
 
 	case kindRate:
 		b.mu.Lock()
-		b.pending[s.user.ID] = &pendingRating{orderID: cb.OrderID, rating: cb.Rating, until: b.now().Add(commentWait)}
+		b.pending[p.UserID] = &pendingRating{orderID: cb.OrderID, rating: cb.Rating, until: b.now().Add(commentWait)}
 		b.mu.Unlock()
 		b.log.InfoContext(ctx, "stars given, waiting for a comment", "order", cb.OrderID, "rating", cb.Rating, "wait", commentWait)
 		answer(fmt.Sprintf("%d⭐", cb.Rating))
@@ -98,8 +103,8 @@ func (b *Bot) onButton(ctx context.Context, api *bot.Bot, u *models.Update) {
 			noCommentKeyboard(cb.OrderID))
 
 	case kindNoNote:
-		p := b.takePending(s.user.ID)
-		if p == nil || p.orderID != cb.OrderID {
+		rating := b.takePending(p.UserID)
+		if rating == nil || rating.orderID != cb.OrderID {
 			b.log.InfoContext(ctx, "no-comment button for an expired rating", "order", cb.OrderID)
 			answer("Nota a expirat, trimite /nota")
 			clear()
@@ -107,10 +112,10 @@ func (b *Bot) onButton(ctx context.Context, api *bot.Bot, u *models.Update) {
 		}
 		answer("")
 		clear()
-		b.submitRating(ctx, p.orderID, p.rating, "")
+		b.submitRating(ctx, rating.orderID, rating.rating, "")
 
 	case kindAllergen:
-		pick, ok := b.findPick(ctx, s.user.ID, cb.Date, cb.DishID)
+		pick, ok := b.findPick(ctx, p, cb.Date, cb.DishID)
 		if !ok {
 			b.log.InfoContext(ctx, "allergen button for a dish no longer known", "date", cb.Date, "dish_id", cb.DishID)
 			answer("Nu mai găsesc felul, trimite /alege")
@@ -120,12 +125,12 @@ func (b *Bot) onButton(ctx context.Context, api *bot.Bot, u *models.Update) {
 		if cb.Yes {
 			allergens = pick.AllergensPossible
 		}
-		if err := b.catalog.ConfirmAllergens(ctx, s.user.ID, cb.DishID, allergens); err != nil {
+		if err := b.users.ConfirmAllergens(ctx, p.ExternalID, cb.DishID, allergens); err != nil {
 			answer("Nu a mers")
 			b.fail(ctx, "confirm allergens", err)
 			return
 		}
-		b.log.InfoContext(ctx, "allergens confirmed", "dish_id", cb.DishID, "dish", pick.Name, "contains", cb.Yes, "allergens", allergens)
+		b.log.InfoContext(ctx, "allergens confirmed", "dish_id", cb.DishID, "dish", pick.Name, "contains", cb.Yes)
 		if cb.Yes {
 			answer("Salvat: conține " + strings.Join(allergens, ", "))
 		} else {
@@ -135,23 +140,23 @@ func (b *Bot) onButton(ctx context.Context, api *bot.Bot, u *models.Update) {
 }
 
 // findPick looks in memory, and asks core again after a restart.
-func (b *Bot) findPick(ctx context.Context, userID int64, date string, dishID int64) (contracts.Pick, bool) {
+func (b *Bot) findPick(ctx context.Context, p person, date string, dishID int64) (contracts.Pick, bool) {
 	b.mu.Lock()
-	pick, ok := b.picks[userID][date][dishID]
+	pick, ok := b.picks[p.UserID][date][dishID]
 	b.mu.Unlock()
 	if ok {
 		return pick, true
 	}
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	r, err := b.core.Recommendation(cctx, userID, date)
+	r, err := b.users.Recommendation(cctx, p.ExternalID, date)
 	if err != nil {
 		return pick, false
 	}
-	b.rememberPicks(userID, date, r.Picks)
-	for _, p := range r.Picks {
-		if p.DishID == dishID {
-			return p, true
+	b.rememberPicks(p.UserID, date, r.Picks)
+	for _, candidate := range r.Picks {
+		if candidate.DishID == dishID {
+			return candidate, true
 		}
 	}
 	return pick, false

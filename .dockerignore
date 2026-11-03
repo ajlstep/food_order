@@ -1,4 +1,4 @@
-# Context for the services that build from the project root (users, gateway, nats-setup).
+# Context for the services that build from the project root (all but logs).
 # Keep it small: no git history, no test browser profile, no secrets, no data.
 .git
 tests
@@ -6,3 +6,4 @@ tests
 **/data
 **/*.db
 **/*.db-*
+**/*.exe

@@ -14,7 +14,7 @@ import (
 	"strconv"
 	"strings"
 
-	"food-order/catalog/internal/contracts"
+	contracts "food-order/shared/contracts/catalog"
 )
 
 var nameReplacer = strings.NewReplacer(

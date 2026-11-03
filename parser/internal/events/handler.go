@@ -19,13 +19,19 @@ import (
 	"time"
 
 	"food-order/parser/internal/applog"
-	"food-order/parser/internal/bus"
-	"food-order/parser/internal/contracts"
 	"food-order/parser/internal/menu"
+	"food-order/shared/contracts/catalog"
+	"food-order/shared/contracts/food"
+	"food-order/shared/events"
+	"food-order/shared/streams"
 )
 
 // MaxDays is the longest period one request may ask for.
 const MaxDays = 14
+
+// SourceName is the "source" of food.menu.fetched; catalog finds the partner
+// of the menu by it.
+const SourceName = "parser"
 
 // Getter is what the handler needs from menu.Service.
 type Getter interface {
@@ -35,7 +41,7 @@ type Getter interface {
 // Handler answers menu requests.
 type Handler struct {
 	Menu Getter
-	Pub  bus.Publisher
+	Pub  events.Publisher
 	Loc  *time.Location // the dates of a request are days in this zone
 	Log  *slog.Logger
 	Now  func() time.Time
@@ -45,33 +51,30 @@ type Handler struct {
 }
 
 // New makes a Handler.
-func New(g Getter, pub bus.Publisher, loc *time.Location, log *slog.Logger) *Handler {
+func New(g Getter, pub events.Publisher, loc *time.Location, log *slog.Logger) *Handler {
 	return &Handler{Menu: g, Pub: pub, Loc: loc, Log: log, Now: time.Now, seen: map[string]time.Time{}}
 }
 
-// Handle processes one event. nil = ack; bus.ErrPermanent = drop; other
-// errors = redeliver later (only when the answer could not be published).
-func (h *Handler) Handle(ctx context.Context, subject string, raw []byte) error {
-	var env contracts.Envelope
+// Handle processes one event; it is a streams.Handler. An error other than a
+// drop comes only when the answer could not be published.
+func (h *Handler) Handle(ctx context.Context, raw []byte) error {
+	var env events.Envelope
 	if err := json.Unmarshal(raw, &env); err != nil {
-		return fmt.Errorf("%w: envelope: %v", bus.ErrPermanent, err)
+		return fmt.Errorf("%w: envelope: %v", streams.ErrDrop, err)
 	}
-	if env.Type == "" {
-		env.Type = subject
-	}
-	if env.Type != contracts.SubjectMenuRequested {
-		return fmt.Errorf("%w: unknown event type %q", bus.ErrPermanent, env.Type)
+	if env.Type != food.SubjectMenuRequested {
+		return fmt.Errorf("%w: unknown event type %q", streams.ErrDrop, env.Type)
 	}
 	if h.duplicate(env.ID) {
 		h.Log.DebugContext(ctx, "duplicate event skipped", "event_id", env.ID)
 		return nil
 	}
-	var req contracts.MenuRequested
+	var req food.MenuRequested
 	if err := json.Unmarshal(env.Data, &req); err != nil {
-		return fmt.Errorf("%w: %s data: %v", bus.ErrPermanent, env.Type, err)
+		return fmt.Errorf("%w: %s data: %v", streams.ErrDrop, env.Type, err)
 	}
 	if req.RequestID == "" { // nobody to answer to
-		return fmt.Errorf("%w: request_id is required", bus.ErrPermanent)
+		return fmt.Errorf("%w: request_id is required", streams.ErrDrop)
 	}
 
 	answer, subjectOut := h.answer(ctx, req)
@@ -89,34 +92,34 @@ func (h *Handler) Handle(ctx context.Context, subject string, raw []byte) error 
 }
 
 // answer fetches every day of the request and builds the reply.
-func (h *Handler) answer(ctx context.Context, req contracts.MenuRequested) (any, string) {
+func (h *Handler) answer(ctx context.Context, req food.MenuRequested) (any, string) {
 	ctx = applog.With(ctx, "request_id", req.RequestID)
 	start := time.Now()
 	h.Log.InfoContext(ctx, "menu requested", "from", req.From, "to", req.To)
 	fail := func(code, format string, args ...any) (any, string) {
 		msg := fmt.Sprintf(format, args...)
-		h.Log.WarnContext(ctx, "menu request failed", "request_id", req.RequestID, "from", req.From, "to", req.To, "code", code, "msg", msg)
-		return contracts.MenuError{RequestID: req.RequestID, Code: code, Message: msg}, contracts.SubjectMenuError
+		h.Log.WarnContext(ctx, "menu request failed", "from", req.From, "to", req.To, "code", code, "msg", msg)
+		return food.MenuError{RequestID: req.RequestID, Code: code, Message: msg}, food.SubjectMenuError
 	}
 
 	from, err := time.ParseInLocation("2006-01-02", req.From, h.Loc)
 	if err != nil {
-		return fail(contracts.ErrBadRequest, "from=%q nu e o dată AAAA-LL-ZZ", req.From)
+		return fail(food.MenuErrBadRequest, "from=%q nu e o dată AAAA-LL-ZZ", req.From)
 	}
 	to := from
 	if req.To != "" {
 		if to, err = time.ParseInLocation("2006-01-02", req.To, h.Loc); err != nil {
-			return fail(contracts.ErrBadRequest, "to=%q nu e o dată AAAA-LL-ZZ", req.To)
+			return fail(food.MenuErrBadRequest, "to=%q nu e o dată AAAA-LL-ZZ", req.To)
 		}
 	}
 	if to.Before(from) {
-		return fail(contracts.ErrBadRequest, "to (%s) e înainte de from (%s)", req.To, req.From)
+		return fail(food.MenuErrBadRequest, "to (%s) e înainte de from (%s)", req.To, req.From)
 	}
 	if days := int(to.Sub(from).Hours()/24) + 1; days > MaxDays {
-		return fail(contracts.ErrBadRequest, "perioada are %d zile, cel mult %d", days, MaxDays)
+		return fail(food.MenuErrBadRequest, "perioada are %d zile, cel mult %d", days, MaxDays)
 	}
 
-	out := contracts.MenuFetched{RequestID: req.RequestID, Source: contracts.SourceName}
+	out := catalog.MenuFetched{RequestID: req.RequestID, Source: SourceName}
 	var empty []string
 	for d := from; !d.After(to); d = d.AddDate(0, 0, 1) {
 		date := d.Format("2006-01-02")
@@ -125,31 +128,34 @@ func (h *Handler) answer(ctx context.Context, req contracts.MenuRequested) (any,
 		h.Log.DebugContext(ctx, "menu day fetched", "date", date, "dishes", len(res.Items), "cached", res.Cached, "ms", applog.Since(dayStart), "err", err)
 		switch {
 		case err == nil:
-			out.Days = append(out.Days, contracts.Day{Date: date, Items: toItems(res.Items)})
-			h.Log.InfoContext(ctx, "menu found", "request_id", req.RequestID, "date", date, "dishes", len(res.Items), "cached", res.Cached)
+			out.Days = append(out.Days, catalog.MenuDay{Date: date, Items: toItems(res.Items)})
+			h.Log.InfoContext(ctx, "menu found", "date", date, "dishes", len(res.Items), "cached", res.Cached)
 		case errors.Is(err, menu.ErrEmpty): // also "throttled, and last time it was empty"
 			h.Log.InfoContext(ctx, "no menu for the day yet", "date", date, "err", err)
 			empty = append(empty, date)
 		case errors.Is(err, menu.ErrParseFailed):
-			return fail(contracts.ErrParseFailed, "%s: pagina nu mai arată cum o știe parserul (site schimbat?): %v", date, err)
+			return fail(food.MenuErrParseFailed, "%s: pagina nu mai arată cum o știe parserul (site schimbat?): %v", date, err)
 		default: // the site is down, a timeout, or throttled after such an error
-			return fail(contracts.ErrSourceUnavailable, "%s: %v", date, err)
+			return fail(food.MenuErrSourceUnavailable, "%s: %v", date, err)
 		}
 	}
 	if len(out.Days) == 0 {
-		return fail(contracts.ErrNoMenu, "încă nu e meniu pentru %v", empty)
+		return fail(food.MenuErrNoMenu, "încă nu e meniu pentru %v", empty)
 	}
 	if len(empty) > 0 { // e.g. a weekend inside the period: the days that have a menu go
-		h.Log.InfoContext(ctx, "some days have no menu", "request_id", req.RequestID, "days", empty)
+		h.Log.InfoContext(ctx, "some days have no menu", "days", empty)
 	}
 	h.Log.InfoContext(ctx, "menu ready to send", "days", len(out.Days), "ms", applog.Since(start))
-	return out, contracts.SubjectMenuFetched
+	return out, food.SubjectMenuFetched
 }
 
-func toItems(in []menu.Item) []contracts.Item {
-	out := make([]contracts.Item, 0, len(in))
+func toItems(in []menu.Item) []catalog.SourceItem {
+	out := make([]catalog.SourceItem, 0, len(in))
 	for _, it := range in {
-		ci := contracts.Item{Name: it.Name, Category: it.Category, WeightText: it.Weight, ImageURL: it.ImageURL, Components: it.Components}
+		ci := catalog.SourceItem{Name: it.Name, Category: it.Category, WeightText: it.Weight, ImageURL: it.ImageURL}
+		for _, name := range it.Components {
+			ci.Components = append(ci.Components, catalog.Component{Name: name})
+		}
 		if it.Price > 0 {
 			p := it.Price
 			ci.Price = &p

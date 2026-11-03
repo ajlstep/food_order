@@ -11,7 +11,7 @@ import (
 // Order is one saved choice with the snapshot of the dish.
 type Order struct {
 	ID     int64
-	UserID int64
+	UserID string
 	Date   string
 	DishID int64
 	Price  *float64
@@ -23,6 +23,7 @@ type Order struct {
 	Forced          bool
 
 	Snapshot
+	Destination
 
 	RatingRequestedAt string
 	RatedAt           string
@@ -45,6 +46,18 @@ type Snapshot struct {
 	NutritionSource string // llm | kitchen | missing
 }
 
+// Destination is where an order goes, as it was when the person chose. Empty
+// = personal: nobody else sees it.
+type Destination struct {
+	GroupID     string
+	GroupName   string
+	CompanyID   string
+	CompanyName string
+	Address     string
+	Lat         *float64
+	Lon         *float64
+}
+
 // ErrRated is returned when the user changes a choice that is already rated.
 var ErrRated = errors.New("order already rated")
 
@@ -52,18 +65,21 @@ const orderCols = `id, user_id, date, dish_id, price, rating, COALESCE(comment, 
 	COALESCE(kitchen_feedback, ''), COALESCE(forced, 0),
 	dish_name, portion_g, kcal_min, kcal_max, protein_g_min, protein_g_max, fat_g_min, fat_g_max,
 	carbs_g_min, carbs_g_max, COALESCE(nutrition_source, 'missing'),
+	COALESCE(group_id, ''), COALESCE(group_name, ''), COALESCE(company_id, ''), COALESCE(company_name, ''),
+	COALESCE(address, ''), lat, lon,
 	COALESCE(rating_requested_at, ''), COALESCE(rated_at, ''), created_at, updated_at`
 
 type scanner interface{ Scan(dest ...any) error }
 
 func scanOrder(r scanner) (Order, error) {
 	var o Order
-	var price, portion, kmin, kmax, pmin, pmax, fmin, fmax, cmin, cmax sql.NullFloat64
+	var price, portion, kmin, kmax, pmin, pmax, fmin, fmax, cmin, cmax, lat, lon sql.NullFloat64
 	var rating sql.NullInt64
 	var forced int
 	err := r.Scan(&o.ID, &o.UserID, &o.Date, &o.DishID, &price, &rating, &o.Comment, &o.Labels,
 		&o.KitchenFeedback, &forced,
 		&o.DishName, &portion, &kmin, &kmax, &pmin, &pmax, &fmin, &fmax, &cmin, &cmax, &o.NutritionSource,
+		&o.GroupID, &o.GroupName, &o.CompanyID, &o.CompanyName, &o.Address, &lat, &lon,
 		&o.RatingRequestedAt, &o.RatedAt, &o.CreatedAt, &o.UpdatedAt)
 	if err != nil {
 		return Order{}, err
@@ -78,6 +94,7 @@ func scanOrder(r scanner) (Order, error) {
 	o.ProteinGMin, o.ProteinGMax = nf(pmin), nf(pmax)
 	o.FatGMin, o.FatGMax = nf(fmin), nf(fmax)
 	o.CarbsGMin, o.CarbsGMax = nf(cmin), nf(cmax)
+	o.Lat, o.Lon = nf(lat), nf(lon)
 	return o, nil
 }
 
@@ -112,11 +129,14 @@ func (s *Store) SaveOrder(ctx context.Context, o Order, now time.Time) (Order, e
 	case errors.Is(err, sql.ErrNoRows):
 		res, err := tx.ExecContext(ctx, `INSERT INTO orders (user_id, date, dish_id, price, forced,
 			dish_name, portion_g, kcal_min, kcal_max, protein_g_min, protein_g_max, fat_g_min, fat_g_max,
-			carbs_g_min, carbs_g_max, nutrition_source, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			carbs_g_min, carbs_g_max, nutrition_source,
+			group_id, group_name, company_id, company_name, address, lat, lon, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			o.UserID, o.Date, o.DishID, pf(o.Price), boolInt(o.Forced),
 			o.DishName, pf(o.PortionG), pf(o.KcalMin), pf(o.KcalMax), pf(o.ProteinGMin), pf(o.ProteinGMax),
-			pf(o.FatGMin), pf(o.FatGMax), pf(o.CarbsGMin), pf(o.CarbsGMax), o.NutritionSource, ts(now), ts(now))
+			pf(o.FatGMin), pf(o.FatGMax), pf(o.CarbsGMin), pf(o.CarbsGMax), o.NutritionSource,
+			nullStr(o.GroupID), nullStr(o.GroupName), nullStr(o.CompanyID), nullStr(o.CompanyName), nullStr(o.Address),
+			pf(o.Lat), pf(o.Lon), ts(now), ts(now))
 		if err != nil {
 			return Order{}, err
 		}
@@ -130,11 +150,14 @@ func (s *Store) SaveOrder(ctx context.Context, o Order, now time.Time) (Order, e
 		_, err := tx.ExecContext(ctx, `UPDATE orders SET dish_id = ?, price = ?, forced = ?,
 			dish_name = ?, portion_g = ?, kcal_min = ?, kcal_max = ?, protein_g_min = ?, protein_g_max = ?,
 			fat_g_min = ?, fat_g_max = ?, carbs_g_min = ?, carbs_g_max = ?, nutrition_source = ?,
+			group_id = ?, group_name = ?, company_id = ?, company_name = ?, address = ?, lat = ?, lon = ?,
 			comment = NULL, labels = NULL, kitchen_feedback = NULL, rating_requested_at = NULL, updated_at = ?
 			WHERE id = ?`,
 			o.DishID, pf(o.Price), boolInt(o.Forced),
 			o.DishName, pf(o.PortionG), pf(o.KcalMin), pf(o.KcalMax), pf(o.ProteinGMin), pf(o.ProteinGMax),
-			pf(o.FatGMin), pf(o.FatGMax), pf(o.CarbsGMin), pf(o.CarbsGMax), o.NutritionSource, ts(now), o.ID)
+			pf(o.FatGMin), pf(o.FatGMax), pf(o.CarbsGMin), pf(o.CarbsGMax), o.NutritionSource,
+			nullStr(o.GroupID), nullStr(o.GroupName), nullStr(o.CompanyID), nullStr(o.CompanyName), nullStr(o.Address),
+			pf(o.Lat), pf(o.Lon), ts(now), o.ID)
 		if err != nil {
 			return Order{}, err
 		}
@@ -146,7 +169,7 @@ func (s *Store) SaveOrder(ctx context.Context, o Order, now time.Time) (Order, e
 }
 
 // Order returns one order of a user (ErrNotFound if it is not theirs).
-func (s *Store) Order(ctx context.Context, userID, id int64) (Order, error) {
+func (s *Store) Order(ctx context.Context, userID string, id int64) (Order, error) {
 	o, err := scanOrder(s.db.QueryRowContext(ctx,
 		`SELECT `+orderCols+` FROM orders WHERE id = ? AND user_id = ?`, id, userID))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -165,20 +188,26 @@ func (s *Store) OrderByID(ctx context.Context, id int64) (Order, error) {
 }
 
 // Orders returns the orders of a user between two dates (inclusive), oldest first.
-func (s *Store) Orders(ctx context.Context, userID int64, from, to string) ([]Order, error) {
+func (s *Store) Orders(ctx context.Context, userID, from, to string) ([]Order, error) {
 	return s.queryOrders(ctx, `SELECT `+orderCols+` FROM orders
 		WHERE user_id = ? AND date >= ? AND date <= ? ORDER BY date, id`, userID, from, to)
 }
 
+// CompanyOrders returns the orders made at an address of a company, oldest first.
+func (s *Store) CompanyOrders(ctx context.Context, companyID, from, to string) ([]Order, error) {
+	return s.queryOrders(ctx, `SELECT `+orderCols+` FROM orders
+		WHERE company_id = ? AND date >= ? AND date <= ? ORDER BY date, id`, companyID, from, to)
+}
+
 // HasOrder says whether the user already chose something for the day.
-func (s *Store) HasOrder(ctx context.Context, userID int64, date string) (bool, error) {
+func (s *Store) HasOrder(ctx context.Context, userID, date string) (bool, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM orders WHERE user_id = ? AND date = ?`, userID, date).Scan(&n)
 	return n > 0, err
 }
 
 // Rate saves the rating and comment of an order of the user.
-func (s *Store) Rate(ctx context.Context, userID, id int64, rating int, comment string, now time.Time) (Order, error) {
+func (s *Store) Rate(ctx context.Context, userID string, id int64, rating int, comment string, now time.Time) (Order, error) {
 	res, err := s.db.ExecContext(ctx, `UPDATE orders SET rating = ?, comment = ?, labels = NULL,
 		kitchen_feedback = NULL, rated_at = ?, updated_at = ? WHERE id = ? AND user_id = ?`,
 		rating, nullStr(comment), ts(now), ts(now), id, userID)

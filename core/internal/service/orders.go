@@ -3,22 +3,25 @@ package service
 import (
 	"context"
 	"errors"
-	"net/http"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
 
-	"food-order/core/internal/catalog"
-	"food-order/core/internal/contracts"
-	"food-order/core/internal/rules"
 	"food-order/core/internal/store"
+	"food-order/shared/contracts/catalog"
+	contracts "food-order/shared/contracts/core"
+	"food-order/shared/contracts/food"
+	"food-order/shared/contracts/users"
+	"food-order/shared/rpc"
 )
 
-// CreateOrder is POST /v1/orders: the user pressed a dish in the bot. The
-// snapshot (name, portion, nutrition with min and max) is taken from catalog
-// now, from the menu of that day; if catalog does not answer, from the
-// candidates saved with the user's recommendation of the day.
-func (s *Service) CreateOrder(ctx context.Context, userID int64, req contracts.CreateOrderRequest) (contracts.Order, error) {
+// CreateOrder: the person pressed a dish in the bot. The snapshot (name,
+// portion, nutrition with min and max) is taken from catalog now, from the
+// menu of that day; if catalog does not answer, from the candidates saved
+// with the recommendation of the day. Where the order goes is taken from
+// users now, too: moving to another group later does not change an old order.
+func (s *Service) CreateOrder(ctx context.Context, userID string, req contracts.CreateOrderRequest) (contracts.Order, error) {
 	if _, err := parseDate("date", req.Date); err != nil {
 		return contracts.Order{}, err
 	}
@@ -38,12 +41,16 @@ func (s *Service) CreateOrder(ctx context.Context, userID int64, req contracts.C
 	if req.Price != nil {
 		price = req.Price
 	}
+	dest, err := s.destination(ctx, userID, req.Personal)
+	if err != nil {
+		return contracts.Order{}, err
+	}
 	o, err := s.Store.SaveOrder(ctx, store.Order{
-		UserID: userID, Date: req.Date, DishID: req.DishID, Price: price, Forced: req.Forced, Snapshot: snap,
+		UserID: userID, Date: req.Date, DishID: req.DishID, Price: price, Forced: req.Forced, Snapshot: snap, Destination: dest,
 	}, s.Now())
 	if errors.Is(err, store.ErrRated) {
 		s.Log.InfoContext(ctx, "order refused: the meal of the day is already rated", "user_id", userID, "date", req.Date, "dish_id", req.DishID)
-		return contracts.Order{}, &Error{Status: http.StatusConflict, Code: "already_rated",
+		return contracts.Order{}, &Error{Code: "already_rated",
 			Message: "Masa din ziua asta e deja notată, alegerea nu se mai poate schimba."}
 	}
 	if err != nil {
@@ -54,12 +61,35 @@ func (s *Service) CreateOrder(ctx context.Context, userID int64, req contracts.C
 	return orderView(o), nil
 }
 
-func (s *Service) snapshot(ctx context.Context, userID, dishID int64, date string) (store.Snapshot, *float64, error) {
+// destination is where the order goes: the group of the person, unless it is
+// a personal order, or nothing if there is no group.
+func (s *Service) destination(ctx context.Context, userID string, personal bool) (store.Destination, error) {
+	if personal {
+		return store.Destination{}, nil
+	}
+	g, err := s.Users.Snapshot(ctx, userID)
+	if err != nil {
+		// without it, a company order would silently look personal
+		return store.Destination{}, &Error{Code: "users_unavailable", Message: "Nu pot afla adresa grupului acum. Încearcă puțin mai târziu."}
+	}
+	return store.Destination{GroupID: g.GroupID, GroupName: g.GroupName, CompanyID: g.CompanyID, CompanyName: g.CompanyName,
+		Address: g.Address, Lat: g.Lat, Lon: g.Lon}, nil
+}
+
+// errOrderClosed is the refusal after the order limit of the partner.
+func errOrderClosed() error {
+	return &Error{Code: "order_closed", Message: "Pentru ziua asta nu se mai poate comanda: a trecut ora limită a bucătăriei."}
+}
+
+func (s *Service) snapshot(ctx context.Context, userID string, dishID int64, date string) (store.Snapshot, *float64, error) {
 	dishes, catErr := s.Catalog.Dishes(ctx, []int64{dishID}, date)
 	if catErr == nil {
 		for _, d := range dishes {
 			if d.ID == dishID {
 				s.Log.DebugContext(ctx, "snapshot from catalog", "dish_id", dishID, "dish", d.Name, "nutrition_source", d.NutritionSource)
+				if closedFor(d.Closed, d.OrderUntilMs, s.Now()) {
+					return store.Snapshot{}, nil, errOrderClosed()
+				}
 				return snapshotOf(d), d.Price, nil
 			}
 		}
@@ -72,6 +102,9 @@ func (s *Service) snapshot(ctx context.Context, userID, dishID int64, date strin
 		for _, c := range rec.Candidates {
 			if c.DishID == dishID {
 				s.Log.InfoContext(ctx, "snapshot taken from the saved recommendation", "dish_id", dishID, "rec", rec.ID, "dish", c.Name)
+				if closedFor(false, c.OrderUntilMs, s.Now()) {
+					return store.Snapshot{}, nil, errOrderClosed()
+				}
 				return store.Snapshot{
 					DishName: c.Name, PortionG: c.PortionG, KcalMin: c.KcalMin, KcalMax: c.KcalMax,
 					ProteinGMin: c.ProteinGMin, ProteinGMax: c.ProteinGMax, FatGMin: c.FatGMin, FatGMax: c.FatGMax,
@@ -80,18 +113,17 @@ func (s *Service) snapshot(ctx context.Context, userID, dishID int64, date strin
 			}
 		}
 	}
-	if catErr != nil && !errors.Is(catErr, catalog.ErrNotFound) {
+	if catErr != nil {
 		s.Log.WarnContext(ctx, "catalog for snapshot", "dish_id", dishID, "err", catErr)
-		return store.Snapshot{}, nil, &Error{Status: http.StatusServiceUnavailable, Code: "catalog_unavailable",
+		return store.Snapshot{}, nil, &Error{Code: "catalog_unavailable",
 			Message: "Catalogul nu răspunde acum. Încearcă puțin mai târziu."}
 	}
-	return store.Snapshot{}, nil, &Error{Status: http.StatusUnprocessableEntity, Code: "dish_not_in_menu",
-		Message: "Felul nu e în meniul zilei."}
+	return store.Snapshot{}, nil, &Error{Code: "dish_not_in_menu", Message: "Felul nu e în meniul zilei."}
 }
 
 // snapshotOf takes from a catalog dish what goes into orders: name,
 // portion and kcal/protein/fat/carbs, each with min and max.
-func snapshotOf(d contracts.CatalogDish) store.Snapshot {
+func snapshotOf(d catalog.Dish) store.Snapshot {
 	snap := store.Snapshot{DishName: d.Name, PortionG: d.WeightG, NutritionSource: orMissing(d.NutritionSource)}
 	if snap.DishName == "" {
 		snap.DishName = "felul #" + strconv.FormatInt(d.ID, 10)
@@ -130,8 +162,9 @@ func orMissing(s string) string {
 	return "missing"
 }
 
-// Rate is POST /v1/orders/{id}/rating.
-func (s *Service) Rate(ctx context.Context, userID, orderID int64, req contracts.RatingRequest) (contracts.Order, error) {
+// Rate saves the rating of an order.
+func (s *Service) Rate(ctx context.Context, userID string, req contracts.RateRequest) (contracts.Order, error) {
+	orderID := req.OrderID
 	if req.Rating < 1 || req.Rating > 5 {
 		return contracts.Order{}, badRequest("bad_rating", "Nota trebuie să fie între 1 și 5.")
 	}
@@ -145,9 +178,9 @@ func (s *Service) Rate(ctx context.Context, userID, orderID int64, req contracts
 		return contracts.Order{}, err
 	}
 	s.Log.InfoContext(ctx, "order rated", "user_id", userID, "order", o.ID, "date", o.Date, "dish_id", o.DishID, "dish", o.DishName,
-		"rating", req.Rating, "comment", comment, "llm_parse", comment != "" && s.Cfg.LLMEnabled)
+		"rating", req.Rating, "llm_parse", comment != "" && s.Cfg.LLMEnabled)
 	if comment != "" && s.Cfg.LLMEnabled {
-		_ = s.publish(ctx, contracts.SubjectFeedbackParseRequested,
+		_ = s.publish(ctx, food.SubjectFeedbackParseRequested,
 			contracts.FeedbackParseRequested{OrderID: o.ID, Rating: req.Rating, Comment: comment})
 	}
 	return orderView(o), nil
@@ -166,8 +199,8 @@ func (s *Service) OnFeedbackParsed(ctx context.Context, ev contracts.FeedbackPar
 	return err
 }
 
-// Orders is GET /v1/orders?from=&to= (oldest first).
-func (s *Service) Orders(ctx context.Context, userID int64, from, to string) ([]contracts.Order, error) {
+// Orders returns the orders of a period, oldest first.
+func (s *Service) Orders(ctx context.Context, userID string, from, to string) ([]contracts.Order, error) {
 	from, to, err := s.period(from, to, 3660)
 	if err != nil {
 		return nil, err
@@ -191,6 +224,7 @@ func orderView(o store.Order) contracts.Order {
 		KcalMin: o.KcalMin, KcalMax: o.KcalMax, ProteinGMin: o.ProteinGMin, ProteinGMax: o.ProteinGMax,
 		FatGMin: o.FatGMin, FatGMax: o.FatGMax, CarbsGMin: o.CarbsGMin, CarbsGMax: o.CarbsGMax,
 		NutritionSource: o.NutritionSource,
+		GroupName:       o.GroupName, CompanyName: o.CompanyName, Address: o.Address,
 	}
 	if o.Labels != "" {
 		v.Labels = []byte(o.Labels)
@@ -198,62 +232,47 @@ func orderView(o store.Order) contracts.Order {
 	return v
 }
 
-// --------------------------------------------------------------- prefs
+// --------------------------------------------------------------- reports
 
-// Prefs is GET /v1/prefs.
-func (s *Service) Prefs(ctx context.Context, userID int64) (contracts.Prefs, error) {
-	ps, err := s.Store.Prefs(ctx, userID)
+// CompanyReport shows the owner of a company who ordered what. Only the
+// orders made at an address of the company are in it: a personal order of a
+// member is nobody's business. Only the owner gets it.
+func (s *Service) CompanyReport(ctx context.Context, userID, from, to string) (contracts.CompanyReport, error) {
+	from, to, err := s.period(from, to, 3660)
 	if err != nil {
-		return contracts.Prefs{}, err
+		return contracts.CompanyReport{}, err
 	}
-	s.Log.DebugContext(ctx, "prefs read", "user_id", userID, "count", len(ps))
-	return contracts.Prefs{Items: prefsView(ps)}, nil
-}
-
-// SetPrefs is PUT /v1/prefs: the whole list. An allergen is always a hard filter.
-func (s *Service) SetPrefs(ctx context.Context, userID int64, in contracts.Prefs) (contracts.Prefs, error) {
-	if len(in.Items) > 200 {
-		return contracts.Prefs{}, badRequest("too_many", "Prea multe preferințe (cel mult 200).")
+	c, err := s.Users.Company(ctx, userID)
+	var refused *rpc.Error
+	switch {
+	case errors.As(err, &refused) && refused.Code == users.ErrNotInCompany:
+		return contracts.CompanyReport{}, &Error{Code: users.ErrNotInCompany, Message: "Nu ești într-o companie."}
+	case err != nil:
+		return contracts.CompanyReport{}, fmt.Errorf("company of the person: %w", err)
+	case !c.IsOwner:
+		return contracts.CompanyReport{}, &Error{Code: users.ErrNotOwner, Message: "Raportul îl vede doar proprietarul companiei."}
 	}
-	seen := map[string]bool{}
-	var items []store.Pref
-	for _, p := range in.Items {
-		kind := strings.ToLower(strings.TrimSpace(p.Kind))
-		value := strings.Join(strings.Fields(p.Value), " ")
-		if !rules.Kinds[kind] {
-			return contracts.Prefs{}, badRequest("bad_pref", "Tip de preferință necunoscut: „%s” (allergen, dislike, like, diet, target).", p.Kind)
-		}
-		if value == "" || len([]rune(value)) > 100 {
-			return contracts.Prefs{}, badRequest("bad_pref", "Valoarea unei preferințe trebuie să aibă 1-100 de caractere.")
-		}
-		if kind == rules.KindTarget {
-			name, v, err := rules.ParseTarget(value)
-			if err != nil {
-				return contracts.Prefs{}, badRequest("bad_pref", "%s", err.Error())
-			}
-			value = name + "=" + strconv.FormatFloat(v, 'f', -1, 64)
-		}
-		hard := p.Hard || kind == rules.KindAllergen
-		key := kind + "\x00" + strings.ToLower(value)
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		items = append(items, store.Pref{Kind: kind, Value: value, Hard: hard})
+	orders, err := s.Store.CompanyOrders(ctx, c.ID, from, to)
+	if err != nil {
+		return contracts.CompanyReport{}, err
 	}
-	if err := s.Store.ReplacePrefs(ctx, userID, items); err != nil {
-		return contracts.Prefs{}, err
+	out := contracts.CompanyReport{From: from, To: to, Items: make([]contracts.ReportLine, 0, len(orders))}
+	for _, o := range orders {
+		out.Items = append(out.Items, contracts.ReportLine{UserID: o.UserID, Date: o.Date, DishName: o.DishName, Price: o.Price, GroupName: o.GroupName})
+		if o.Price != nil {
+			out.Spent += *o.Price
+		}
 	}
-	s.Log.InfoContext(ctx, "prefs saved", "user_id", userID, "count", len(items), "sent", len(in.Items), "items", items)
-	return s.Prefs(ctx, userID)
+	out.Spent = round2(out.Spent)
+	s.Log.InfoContext(ctx, "company report", "company_id", c.ID, "from", from, "to", to, "orders", len(out.Items))
+	return out, nil
 }
 
 // --------------------------------------------------------------- stats
 
-// Stats is GET /v1/stats?from=&to=: everything straight from orders, no
-// calls to catalog. Nutrition is summed separately on min and on max, so a
+// Stats: everything straight from orders, no calls to catalog. Nutrition is summed separately on min and on max, so a
 // total is still an interval; orders without values are counted apart.
-func (s *Service) Stats(ctx context.Context, userID int64, from, to string) (contracts.Stats, error) {
+func (s *Service) Stats(ctx context.Context, userID string, from, to string) (contracts.Stats, error) {
 	from, to, err := s.period(from, to, 3660)
 	if err != nil {
 		return contracts.Stats{}, err

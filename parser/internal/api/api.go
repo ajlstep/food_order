@@ -7,15 +7,15 @@
 package api
 
 import (
-	"sync/atomic"
-	"io"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"food-order/parser/internal/applog"

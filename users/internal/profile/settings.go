@@ -29,6 +29,7 @@ var settingDefs = []settingDef{
 	{users.SettingRecFor, "tomorrow", oneOf("today", "tomorrow")},
 	{users.SettingNotifyPersonal, "true", oneOf("true", "false")},
 	{users.SettingNotifyGroup, "true", oneOf("true", "false")},
+	{users.SettingOrderTo, users.OrderToGroup, oneOf(users.OrderToGroup, users.OrderToPersonal)},
 }
 
 // defaultSettings returns every setting with its default.

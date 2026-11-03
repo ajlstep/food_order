@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"time"
 
-	"food-order/core/internal/bus"
-	"food-order/core/internal/contracts"
 	"food-order/core/internal/service"
 	"food-order/core/internal/store"
+	contracts "food-order/shared/contracts/core"
+	"food-order/shared/contracts/food"
+	"food-order/shared/events"
+	"food-order/shared/streams"
 )
 
 // Handler handles one raw event.
@@ -26,15 +28,11 @@ func New(svc *service.Service) *Handler {
 	return &Handler{Svc: svc, Store: svc.Store, Now: svc.Now}
 }
 
-// Handle processes one event. nil = ack; bus.ErrPermanent = drop; other
-// errors = redeliver later.
-func (h *Handler) Handle(ctx context.Context, subject string, raw []byte) error {
-	var env contracts.Envelope
+// Handle processes one event; it is a streams.Handler.
+func (h *Handler) Handle(ctx context.Context, raw []byte) error {
+	var env events.Envelope
 	if err := json.Unmarshal(raw, &env); err != nil {
-		return fmt.Errorf("%w: envelope: %v", bus.ErrPermanent, err)
-	}
-	if env.Type == "" {
-		env.Type = subject
+		return fmt.Errorf("%w: envelope: %v", streams.ErrDrop, err)
 	}
 	if env.ID != "" {
 		done, err := h.Store.Processed(ctx, env.ID)
@@ -49,23 +47,23 @@ func (h *Handler) Handle(ctx context.Context, subject string, raw []byte) error 
 
 	var err error
 	switch env.Type {
-	case contracts.SubjectMenuReady:
-		var d contracts.MenuReady
+	case food.SubjectMenuReady:
+		var d food.MenuReady
 		if err = decode(env, &d); err == nil {
 			err = need(d.RequestID != "" && d.From != "", "request_id and from are required")
 		}
 		if err == nil {
 			err = h.Svc.OnMenuReady(ctx, d)
 		}
-	case contracts.SubjectMenuError:
-		var d contracts.MenuError
+	case food.SubjectMenuError:
+		var d food.MenuError
 		if err = decode(env, &d); err == nil {
 			err = need(d.RequestID != "", "request_id is required")
 		}
 		if err == nil {
 			err = h.Svc.OnMenuError(ctx, d)
 		}
-	case contracts.SubjectRecommendationGenerated:
+	case food.SubjectRecommendationGenerated:
 		var d contracts.RecommendationGenerated
 		if err = decode(env, &d); err == nil {
 			err = need(d.RequestID != "", "request_id is required")
@@ -73,7 +71,7 @@ func (h *Handler) Handle(ctx context.Context, subject string, raw []byte) error 
 		if err == nil {
 			err = h.Svc.OnRecommendationGenerated(ctx, d)
 		}
-	case contracts.SubjectFeedbackParsed:
+	case food.SubjectFeedbackParsed:
 		var d contracts.FeedbackParsed
 		if err = decode(env, &d); err == nil {
 			err = need(d.OrderID > 0, "order_id is required")
@@ -82,11 +80,11 @@ func (h *Handler) Handle(ctx context.Context, subject string, raw []byte) error 
 			err = h.Svc.OnFeedbackParsed(ctx, d)
 		}
 	default:
-		return fmt.Errorf("%w: unknown event type %q", bus.ErrPermanent, env.Type)
+		return fmt.Errorf("%w: unknown event type %q", streams.ErrDrop, env.Type)
 	}
 	if err != nil {
 		if _, bad := err.(*service.Error); bad {
-			return fmt.Errorf("%w: %s: %v", bus.ErrPermanent, env.Type, err)
+			return fmt.Errorf("%w: %s: %v", streams.ErrDrop, env.Type, err)
 		}
 		return err
 	}
@@ -96,16 +94,16 @@ func (h *Handler) Handle(ctx context.Context, subject string, raw []byte) error 
 	return nil
 }
 
-func decode(env contracts.Envelope, out any) error {
+func decode(env events.Envelope, out any) error {
 	if err := json.Unmarshal(env.Data, out); err != nil {
-		return fmt.Errorf("%w: %s data: %v", bus.ErrPermanent, env.Type, err)
+		return fmt.Errorf("%w: %s data: %v", streams.ErrDrop, env.Type, err)
 	}
 	return nil
 }
 
 func need(ok bool, msg string) error {
 	if !ok {
-		return fmt.Errorf("%w: %s", bus.ErrPermanent, msg)
+		return fmt.Errorf("%w: %s", streams.ErrDrop, msg)
 	}
 	return nil
 }

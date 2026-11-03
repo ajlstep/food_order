@@ -19,15 +19,12 @@ const (
 	EnvTelegramToken = "BOT_TELEGRAM_TOKEN"
 	EnvAdminChatID   = "BOT_ADMIN_CHAT_ID"
 	EnvAllowedChats  = "BOT_ALLOWED_CHAT_IDS"
-	EnvDBPath        = "BOT_DB_PATH"
-	EnvCoreURL       = "BOT_CORE_URL"
-	EnvCatalogURL    = "BOT_CATALOG_URL"
+	EnvTelegramAPI   = "BOT_TELEGRAM_API_URL" // optional: a local Bot API server, or a fake one
+	EnvGatewayURL    = "BOT_GATEWAY_URL"
+	EnvGatewayKey    = "BOT_GATEWAY_KEY"
 	EnvNATSURL       = "BOT_NATS_URL"
-	EnvNATSToken     = "BOT_NATS_TOKEN"
 	EnvNATSUser      = "BOT_NATS_USER"
 	EnvNATSPassword  = "BOT_NATS_PASSWORD"
-	EnvNATSStream    = "BOT_NATS_STREAM"
-	EnvNATSDurable   = "BOT_NATS_DURABLE"
 	EnvAddr          = "BOT_ADDR"
 	EnvHTTPTimeout   = "BOT_HTTP_TIMEOUT"
 	EnvMode          = "BOT_MODE"
@@ -49,21 +46,18 @@ var secretRe = regexp.MustCompile(`^[A-Za-z0-9_-]{16,256}$`)
 
 // Config is everything the bot needs to start.
 type Config struct {
-	TelegramToken string
-	AdminChatID   int64          // gets food.alert; 0 = alerts only in the log
-	AllowedChats  map[int64]bool // empty = anyone can /start
-	DBPath        string         // bot.db: users and their settings
+	TelegramToken  string
+	TelegramAPIURL string         // empty = the real Telegram
+	AdminChatID    int64          // gets the alerts; 0 = alerts only in the log
+	AllowedChats   map[int64]bool // empty = anyone can /start
 
-	CoreURL     string
-	CatalogURL  string
+	GatewayURL  string // everything the bot asks goes here
+	GatewayKey  string // the same value as GATEWAY_BOT_KEY in the gateway
 	HTTPTimeout time.Duration
 
-	NATSURL      string // empty = run without events (only commands)
-	NATSToken    string
+	NATSURL      string // empty = run without the notify queue (only commands)
 	NATSUser     string
 	NATSPassword string
-	NATSStream   string
-	NATSDurable  string
 
 	Addr string // HTTP server: /healthz and, in webhook mode, the webhook path
 
@@ -98,21 +92,21 @@ func Load(envFile string) (Config, error) {
 func parse(get func(key, def string) string) (Config, error) {
 	var errs []error
 	cfg := Config{
-		TelegramToken: get(EnvTelegramToken, ""),
-		CoreURL:       strings.TrimRight(get(EnvCoreURL, "http://core:9081"), "/"),
-		CatalogURL:    strings.TrimRight(get(EnvCatalogURL, "http://catalog:9082"), "/"),
-		NATSURL:       get(EnvNATSURL, "nats://nats:4222"),
-		NATSToken:     get(EnvNATSToken, ""),
-		NATSUser:      get(EnvNATSUser, ""),
-		NATSPassword:  get(EnvNATSPassword, ""),
-		NATSStream:    get(EnvNATSStream, "FOOD"),
-		NATSDurable:   get(EnvNATSDurable, "bot"),
-		Addr:          get(EnvAddr, ":9001"),
-		DBPath:        get(EnvDBPath, "data/bot.db"),
+		TelegramToken:  get(EnvTelegramToken, ""),
+		TelegramAPIURL: strings.TrimRight(get(EnvTelegramAPI, ""), "/"),
+		GatewayURL:     strings.TrimRight(get(EnvGatewayURL, "http://gateway:8080"), "/"),
+		GatewayKey:     get(EnvGatewayKey, ""),
+		NATSURL:        get(EnvNATSURL, "nats://nats:4222"),
+		NATSUser:       get(EnvNATSUser, "bot"),
+		NATSPassword:   get(EnvNATSPassword, ""),
+		Addr:           get(EnvAddr, ":8086"),
 	}
 
 	if cfg.TelegramToken == "" {
 		errs = append(errs, fmt.Errorf("%s is required", EnvTelegramToken))
+	}
+	if cfg.GatewayKey == "" {
+		errs = append(errs, fmt.Errorf("%s is required: the same value as GATEWAY_BOT_KEY", EnvGatewayKey))
 	}
 
 	for key, dst := range map[string]*bool{EnvAdditionalLogs: &cfg.AdditionalLogs, EnvLogConsole: &cfg.LogConsole} {
@@ -142,9 +136,6 @@ func parse(get func(key, def string) string) (Config, error) {
 			continue
 		}
 		cfg.AllowedChats[id] = true
-	}
-	if cfg.DBPath == "" {
-		errs = append(errs, fmt.Errorf("%s is required", EnvDBPath))
 	}
 
 	d, err := time.ParseDuration(get(EnvHTTPTimeout, "10s"))
@@ -176,10 +167,6 @@ func parse(get func(key, def string) string) (Config, error) {
 		}
 	default:
 		errs = append(errs, fmt.Errorf("%s=%q: expected webhook or polling", EnvMode, cfg.Mode))
-	}
-
-	if cfg.NATSToken != "" && cfg.NATSUser != "" {
-		errs = append(errs, fmt.Errorf("set either %s or %s/%s, not both", EnvNATSToken, EnvNATSUser, EnvNATSPassword))
 	}
 
 	if len(errs) > 0 {

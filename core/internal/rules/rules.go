@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"food-order/core/internal/config"
-	"food-order/core/internal/contracts"
+	"food-order/shared/contracts/catalog"
 )
 
 // Pref kinds.
@@ -25,8 +25,12 @@ const (
 	KindTarget   = "target" // "kcal=700": daily target for one meal (provisional, see README)
 )
 
-// Kinds are the accepted preference kinds.
-var Kinds = map[string]bool{KindAllergen: true, KindDislike: true, KindLike: true, KindDiet: true, KindTarget: true}
+// Pref is one thing the person said about food. The list comes from users.
+type Pref struct {
+	Kind  string
+	Value string
+	Hard  bool
+}
 
 // Past is one past order of the user, as the score needs it.
 type Past struct {
@@ -41,8 +45,8 @@ type Past struct {
 // Input is everything the score looks at for one user and one day.
 type Input struct {
 	Date       string // the day of the menu
-	Dishes     []contracts.CatalogDish
-	Prefs      []contracts.Pref
+	Dishes     []catalog.Dish
+	Prefs      []Pref
 	History    []Past
 	Similarity map[int64]float64 // from catalog, may be nil
 }
@@ -54,7 +58,7 @@ type Parts struct {
 
 // Scored is a dish that passed the hard filters, with its score.
 type Scored struct {
-	Dish      contracts.CatalogDish
+	Dish      catalog.Dish
 	Score     float64
 	Parts     Parts
 	AvgRating *float64 // the user's plain mean rating of this dish, if rated
@@ -117,7 +121,7 @@ func Rank(in Input, cfg config.Score) Result {
 
 // dishText is what preferences are matched against: name, category,
 // components, cooking methods (with the words people use) and tags.
-func dishText(d contracts.CatalogDish) text {
+func dishText(d catalog.Dish) text {
 	parts := []string{d.Name, d.Category}
 	for _, c := range d.Components {
 		parts = append(parts, c.Name)
@@ -128,7 +132,7 @@ func dishText(d contracts.CatalogDish) text {
 }
 
 // componentText is only what the dish is made of (for allergen words).
-func componentText(d contracts.CatalogDish) text {
+func componentText(d catalog.Dish) text {
 	parts := []string{d.Name}
 	for _, c := range d.Components {
 		parts = append(parts, c.Name)
@@ -138,7 +142,7 @@ func componentText(d contracts.CatalogDish) text {
 
 // EffectiveAllergens: given by the source > confirmed by a user > guessed
 // by the model. A confirmation (even "none") replaces the guess.
-func EffectiveAllergens(a contracts.CatalogAllergens) []string {
+func EffectiveAllergens(a catalog.Allergens) []string {
 	out := append([]string{}, a.Given...)
 	if a.Confirmed != nil {
 		return append(out, (*a.Confirmed)...)
@@ -150,7 +154,7 @@ func EffectiveAllergens(a contracts.CatalogAllergens) []string {
 }
 
 // hardFilter returns why a dish must not be recommended ("" = it may).
-func hardFilter(d contracts.CatalogDish, t text, prefs []contracts.Pref) string {
+func hardFilter(d catalog.Dish, t text, prefs []Pref) string {
 	allergens := newText(strings.Join(EffectiveAllergens(d.Allergens), " ; "))
 	components := componentText(d)
 	for _, p := range prefs {
@@ -236,7 +240,7 @@ func countLabels(raw string) int {
 	return len(m)
 }
 
-func score(d contracts.CatalogDish, t text, in Input, st history, targets map[string]float64, cfg config.Score) Scored {
+func score(d catalog.Dish, t text, in Input, st history, targets map[string]float64, cfg config.Score) Scored {
 	s := Scored{Dish: d}
 
 	// rating: Bayesian mean pulled towards the user's own mean, mapped 1..5 -> 0..1
@@ -282,11 +286,11 @@ func score(d contracts.CatalogDish, t text, in Input, st history, targets map[st
 
 // targetFit: 1 = on target, 0 = far away. A dish without values gets 0.5
 // (it does not take part), as does everybody when there is no target.
-func targetFit(d contracts.CatalogDish, targets map[string]float64, mode string) float64 {
+func targetFit(d catalog.Dish, targets map[string]float64, mode string) float64 {
 	if len(targets) == 0 || d.Nutrition == nil || d.NutritionSource == "missing" {
 		return 0.5
 	}
-	values := map[string]*contracts.Range{
+	values := map[string]*catalog.Range{
 		"kcal": d.Nutrition.Kcal, "protein_g": d.Nutrition.ProteinG,
 		"fat_g": d.Nutrition.FatG, "carbs_g": d.Nutrition.CarbsG,
 	}
@@ -313,7 +317,7 @@ func targetFit(d contracts.CatalogDish, targets map[string]float64, mode string)
 }
 
 // Targets reads the "target" preferences ("kcal=700", "protein_g=40").
-func Targets(prefs []contracts.Pref) map[string]float64 {
+func Targets(prefs []Pref) map[string]float64 {
 	out := map[string]float64{}
 	for _, p := range prefs {
 		if p.Kind != KindTarget {

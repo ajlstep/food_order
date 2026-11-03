@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"food-order/catalog/internal/contracts"
 	"food-order/catalog/internal/food"
+	contracts "food-order/shared/contracts/catalog"
 )
 
 // querier is what *sql.DB and *sql.Tx have in common.

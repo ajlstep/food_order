@@ -10,11 +10,12 @@ import (
 	"food-order/shared/contracts/users"
 	"food-order/shared/rpc"
 	"food-order/users/internal/auth"
+	"food-order/users/internal/org"
 	"food-order/users/internal/profile"
 )
 
 // Register connects every subject of the service to its handler.
-func Register(srv *rpc.Server, log *slog.Logger, authHandler *auth.Handler, profileHandler *profile.Handler) error {
+func Register(srv *rpc.Server, log *slog.Logger, authHandler *auth.Handler, profileHandler *profile.Handler, orgHandler *org.Handler) error {
 	routes := []struct {
 		subject string
 		handler rpc.Handler
@@ -40,6 +41,24 @@ func Register(srv *rpc.Server, log *slog.Logger, authHandler *auth.Handler, prof
 		{users.SubjectProfileLocationsDel, profileHandler.LocationsDelete},
 		{users.SubjectProfileLocationsMain, profileHandler.LocationsDefault},
 		{users.SubjectProfileChannelsGet, profileHandler.ChannelsGet},
+		{users.SubjectProfileDue, profileHandler.Due},
+
+		{users.SubjectOrgCompanyCreate, orgHandler.CompanyCreate},
+		{users.SubjectOrgCompanyGet, orgHandler.CompanyGet},
+		{users.SubjectOrgCompanyUpdate, orgHandler.CompanyUpdate},
+		{users.SubjectOrgCompanyLeave, orgHandler.CompanyLeave},
+		{users.SubjectOrgCompanyInvite, orgHandler.CompanyInvite},
+		{users.SubjectOrgCompanyRemove, orgHandler.CompanyRemove},
+		{users.SubjectOrgGroupCreate, orgHandler.GroupCreate},
+		{users.SubjectOrgGroupGet, orgHandler.GroupGet},
+		{users.SubjectOrgGroupDelete, orgHandler.GroupDelete},
+		{users.SubjectOrgGroupLeave, orgHandler.GroupLeave},
+		{users.SubjectOrgGroupInvite, orgHandler.GroupInvite},
+		{users.SubjectOrgGroupRemove, orgHandler.GroupRemove},
+		{users.SubjectOrgInviteList, orgHandler.InviteList},
+		{users.SubjectOrgInviteAccept, orgHandler.InviteAccept},
+		{users.SubjectOrgInviteDecline, orgHandler.InviteDecline},
+		{users.SubjectOrgSnapshot, orgHandler.Snapshot},
 	}
 	for _, r := range routes {
 		if err := srv.Handle(r.subject, traced(log, r.subject, r.handler)); err != nil {

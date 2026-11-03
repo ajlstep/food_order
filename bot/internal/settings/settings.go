@@ -1,10 +1,11 @@
-// Package settings describes the user settings kept by the bot (order time,
-// order days, time zone, ...). Every setting is a key with a text value in
-// the user_settings table; this file says what each key means, its default
-// and how to read it.
+// Package settings is the bot's side of the user settings (order time, order
+// days, time zone, ...). The values live in the users service, in a fixed
+// form; this file turns what people type ("luni-vineri", "16.30") into that
+// form, shows it back, and reads it (next order day, ...). users checks the
+// values again: this package only makes them friendly.
 //
-// To add a setting: append one Def to Defs (key, default, parse, format) and,
-// if code needs it, add an accessor on Settings. No migration needed.
+// To add a setting: one row in the table of users, and here one Def in Defs
+// (key, default, parse, format) and, if code needs it, an accessor on Settings.
 package settings
 
 import (
@@ -14,13 +15,19 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"food-order/shared/contracts/users"
 )
 
 // Keys of the known settings.
 const (
-	KeyOrderTime = "order_time" // "16:00": when the bot asks for the recommendation
-	KeyOrderDays = "order_days" // "1,2,3,4,5": ISO weekdays (1 = Monday .. 7 = Sunday)
-	KeyTimezone  = "timezone"   // "Europe/Chisinau"
+	KeyOrderTime      = users.SettingOrderTime
+	KeyOrderDays      = users.SettingOrderDays
+	KeyTimezone       = users.SettingTimezone
+	KeyRecFor         = users.SettingRecFor
+	KeyNotifyPersonal = users.SettingNotifyPersonal
+	KeyNotifyGroup    = users.SettingNotifyGroup
+	KeyOrderTo        = users.SettingOrderTo
 )
 
 // Def describes one setting.
@@ -53,7 +60,33 @@ var Defs = []Def{
 		Label: "Fusul orar", Help: "/setari fus Europe/Chisinau",
 		Default: "Europe/Chisinau", Parse: parseTimezone, Format: func(v string) string { return v },
 	},
+	{
+		Key: KeyRecFor, Aliases: []string{"recomandare", "pentru"},
+		Label: "Recomandarea e pentru", Help: "/setari recomandare azi  sau  /setari recomandare maine",
+		Default: recTomorrow, Parse: parseRecFor, Format: formatRecFor,
+	},
+	{
+		Key: KeyNotifyPersonal, Aliases: []string{"personale"},
+		Label: "Notificări personale", Help: "/setari personale da",
+		Default: "true", Parse: parseOnOff, Format: formatOnOff,
+	},
+	{
+		Key: KeyNotifyGroup, Aliases: []string{"grup"},
+		Label: "Notificări de grup", Help: "/setari grup nu",
+		Default: "true", Parse: parseOnOff, Format: formatOnOff,
+	},
+	{
+		Key: KeyOrderTo, Aliases: []string{"comanda"},
+		Label: "Comenzile merg la", Help: "/setari comanda personal  sau  /setari comanda grup",
+		Default: users.OrderToGroup, Parse: parseOrderTo, Format: formatOrderTo,
+	},
 }
+
+// Values of rec_for.
+const (
+	recToday    = "today"
+	recTomorrow = "tomorrow"
+)
 
 // ErrUnknown is returned by Find for a key or alias that does not exist.
 var ErrUnknown = errors.New("unknown setting")
@@ -116,6 +149,19 @@ func (s Settings) Location() *time.Location {
 	return loc
 }
 
+// Personal says whether the orders of the person stay out of their group.
+func (s Settings) Personal() bool { return s[KeyOrderTo] == users.OrderToPersonal }
+
+// RecommendationDay is the day a recommendation asked now is for: today, or
+// the next order day, as the person chose.
+func (s Settings) RecommendationDay(now time.Time) time.Time {
+	if s[KeyRecFor] == recToday {
+		t := now.In(s.Location())
+		return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
+	}
+	return s.NextOrderDay(now)
+}
+
 // NextOrderDay is the first order day after today (in the user's time zone).
 // With no order days set, it is tomorrow.
 func (s Settings) NextOrderDay(now time.Time) time.Time {
@@ -130,26 +176,6 @@ func (s Settings) NextOrderDay(now time.Time) time.Time {
 		}
 	}
 	return today.AddDate(0, 0, 1)
-}
-
-// Due says whether the automatic recommendation must be asked now:
-// today is an order day and now is between the order time and order time +
-// window. forDate is the day the recommendation is for (the next order day).
-//
-// Example with Monday–Friday at 16:00: on Friday at 16:00 the bot asks for
-// Monday, on Monday at 16:00 for Tuesday, nothing on Saturday and Sunday.
-func (s Settings) Due(now time.Time, window time.Duration) (forDate time.Time, ok bool) {
-	loc := s.Location()
-	t := now.In(loc)
-	if !s.OrderDays()[t.Weekday()] {
-		return time.Time{}, false
-	}
-	h, m := s.OrderTime()
-	at := time.Date(t.Year(), t.Month(), t.Day(), h, m, 0, 0, loc)
-	if t.Before(at) || !t.Before(at.Add(window)) {
-		return time.Time{}, false
-	}
-	return s.NextOrderDay(now), true
 }
 
 func defaultOf(key string) string {
@@ -252,6 +278,79 @@ func parseTimezone(v string) (string, error) {
 		return "", fmt.Errorf("nu cunosc fusul orar %q", v)
 	}
 	return v, nil
+}
+
+func parseRecFor(v string) (string, error) {
+	switch noDiacritics.Replace(strings.ToLower(strings.TrimSpace(v))) {
+	case "azi", "today":
+		return recToday, nil
+	case "maine", "tomorrow":
+		return recTomorrow, nil
+	}
+	return "", errors.New("scrie azi sau mâine")
+}
+
+func formatRecFor(v string) string {
+	if v == recToday {
+		return "azi"
+	}
+	return "mâine"
+}
+
+func parseOrderTo(v string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "grup", users.OrderToGroup:
+		return users.OrderToGroup, nil
+	case users.OrderToPersonal:
+		return users.OrderToPersonal, nil
+	}
+	return "", errors.New("scrie grup sau personal")
+}
+
+func formatOrderTo(v string) string {
+	if v == users.OrderToPersonal {
+		return "adresa mea (personal)"
+	}
+	return "adresa grupului"
+}
+
+func parseOnOff(v string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "da", "yes", "on", "true":
+		return "true", nil
+	case "nu", "no", "off", "false":
+		return "false", nil
+	}
+	return "", errors.New("scrie da sau nu")
+}
+
+func formatOnOff(v string) string {
+	if v == "false" {
+		return "nu"
+	}
+	return "da"
+}
+
+// Toggle gives the other value of a setting with two values.
+func Toggle(key, v string) (string, error) {
+	switch key {
+	case KeyRecFor:
+		if v == recToday {
+			return recTomorrow, nil
+		}
+		return recToday, nil
+	case KeyNotifyPersonal, KeyNotifyGroup:
+		if v == "false" {
+			return "true", nil
+		}
+		return "false", nil
+	case KeyOrderTo:
+		if v == users.OrderToPersonal {
+			return users.OrderToGroup, nil
+		}
+		return users.OrderToPersonal, nil
+	}
+	return "", fmt.Errorf("%w: %q has more than two values", ErrUnknown, key)
 }
 
 // DayShort are the short names, index = ISO weekday (1 = Monday).

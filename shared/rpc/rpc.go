@@ -70,6 +70,13 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("%s: %s", e.Code, e.Message)
 }
 
+// Refuse builds a "no" meant for a person: the text goes to them as it is,
+// in the "text" detail. The services that speak to people that way (core,
+// catalog) write it in Romanian.
+func Refuse(code, text string) *Error {
+	return &Error{Code: code, Message: text, Details: map[string]any{"text": text}}
+}
+
 // NewError builds an *Error without details.
 func NewError(code, message string) *Error {
 	return &Error{Code: code, Message: message}

@@ -1,11 +1,10 @@
 // Command bot is the Telegram service of food-order: the interface between
-// the users and the other services. It owns the users (Telegram chat, name,
-// nickname, phone) and their settings (order time, order days, ...) in its
-// own SQLite file, bot.db. Core only knows users.id. Food business logic
-// stays in core: the bot shows recommendations, sends choices and ratings
-// to core, asks for the recommendation at each user's order time, and
-// forwards the events (recommendation ready, rating question) to the user
-// and alerts to the admin chat.
+// people and the other services. It keeps no data: everything it asks goes
+// through the gateway. From NATS it reads only its own queue of messages for
+// people (notify.telegram).
+//
+// main only starts things: it reads the settings, builds the pieces, joins
+// them and waits for the stop signal.
 //
 // All settings live in internal/config (see .env.example).
 package main
@@ -25,11 +24,11 @@ import (
 
 	"food-order/bot/internal/applog"
 	"food-order/bot/internal/config"
-	"food-order/bot/internal/events"
-	"food-order/bot/internal/scheduler"
+	"food-order/bot/internal/notify"
 	"food-order/bot/internal/services"
-	"food-order/bot/internal/store"
 	"food-order/bot/internal/tg"
+	"food-order/shared/bus"
+	"food-order/shared/streams"
 )
 
 func main() {
@@ -43,7 +42,7 @@ func main() {
 		os.Exit(1)
 	}
 	al := applog.New(applog.Options{
-		Service: "bot", URL: cfg.NATSURL, Token: cfg.NATSToken, User: cfg.NATSUser, Password: cfg.NATSPassword,
+		Service: "bot", URL: cfg.NATSURL, User: cfg.NATSUser, Password: cfg.NATSPassword,
 		Additional: cfg.AdditionalLogs || *debug, Console: cfg.LogConsole,
 	})
 	slog.SetDefault(al.Logger)
@@ -56,95 +55,62 @@ func main() {
 }
 
 func run(log *slog.Logger, cfg config.Config) error {
-	var err error
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	db, err := store.Open(cfg.DBPath)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
 	hc := &http.Client{Timeout: cfg.HTTPTimeout}
-	core := services.NewCore(cfg.CoreURL, hc).WithLog(log)
 	b, err := tg.New(tg.Options{
 		Token:        cfg.TelegramToken,
+		ServerURL:    cfg.TelegramAPIURL,
 		AdminChatID:  cfg.AdminChatID,
 		AllowedChats: cfg.AllowedChats,
-		Users:        db,
-		Core:         core,
-		Catalog:      services.NewCatalog(cfg.CatalogURL, hc).WithLog(log),
+		Users:        services.NewGateway(cfg.GatewayURL, cfg.GatewayKey, hc, log),
 		Log:          log,
 	})
 	if err != nil {
 		return err
 	}
 
-	// at every user's order time, on its order days: ask core for the recommendation
-	sched := &scheduler.Scheduler{Store: db, Core: core, Notify: b.NotifyUser, Log: log}
-	go sched.Run(ctx)
-
-	errc := make(chan error, 2)
-
-	// One HTTP server: /healthz for Docker and, in webhook mode, the path
-	// Telegram calls. Only the webhook path should be exposed by the proxy.
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		log.DebugContext(r.Context(), "healthz", "remote", r.RemoteAddr)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	})
-	if cfg.Mode == config.ModeWebhook {
-		mux.Handle(cfg.WebhookPath, b.WebhookHandler(cfg.WebhookSecret))
-	}
+	failed := make(chan error, 2)
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           mux,
+		Handler:           b.HTTPHandler(cfg.WebhookPath, cfg.WebhookSecret),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
 	}
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errc <- err
+		if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+			failed <- err
 		}
 	}()
 
-	// events from NATS (optional: without BOT_NATS_URL only the commands work)
-	if cfg.NATSURL != "" {
+	if cfg.NATSURL == "" {
+		log.Warn("BOT_NATS_URL is empty: no notifications, only commands work")
+	} else {
+		nc, err := bus.Connect(bus.Options{Name: "bot", URL: cfg.NATSURL, User: cfg.NATSUser, Password: cfg.NATSPassword}, log)
+		if err != nil {
+			return err
+		}
+		defer nc.Close()
+		queue := notify.NewHandler(b, log)
 		go func() {
-			err := events.Run(ctx, events.ConsumerConfig{
-				URL:      cfg.NATSURL,
-				Token:    cfg.NATSToken,
-				User:     cfg.NATSUser,
-				Password: cfg.NATSPassword,
-				Stream:   cfg.NATSStream,
-				Durable:  cfg.NATSDurable,
-			}, events.NewHandler(b), log)
-			if err != nil && !errors.Is(err, context.Canceled) {
-				errc <- err
+			if err := streams.Consume(ctx, nc, streams.Notify, streams.ConsumerBotTelegram, queue.Handle, log); err != nil {
+				failed <- err
 			}
 		}()
-	} else {
-		log.Warn("BOT_NATS_URL is empty: events are off, only commands work")
 	}
 
-	// both return when ctx is cancelled
 	if cfg.Mode == config.ModeWebhook {
 		go b.RunWebhook(ctx, cfg.WebhookURL, cfg.WebhookSecret)
-		log.Info("bot started (webhook)", "db", cfg.DBPath, "addr", cfg.Addr, "path", cfg.WebhookPath, "public_url", cfg.WebhookURL,
-			"core", cfg.CoreURL, "catalog", cfg.CatalogURL, "nats", cfg.NATSURL)
 	} else {
 		go b.RunPolling(ctx)
-		log.Info("bot started (polling)", "db", cfg.DBPath, "addr", cfg.Addr, "core", cfg.CoreURL, "catalog", cfg.CatalogURL, "nats", cfg.NATSURL)
 	}
-	log.Info("bot logs", "additional_logs", cfg.AdditionalLogs, "log_console", cfg.LogConsole,
-		"admin_chat", cfg.AdminChatID != 0, "allowed_chats", len(cfg.AllowedChats))
+	log.Info("bot started", "mode", cfg.Mode, "addr", cfg.Addr, "gateway", cfg.GatewayURL,
+		"additional_logs", cfg.AdditionalLogs, "admin_chat", cfg.AdminChatID != 0, "allowed_chats", len(cfg.AllowedChats))
 
 	select {
-	case err = <-errc:
+	case err = <-failed:
 		stop()
 	case <-ctx.Done():
 	}

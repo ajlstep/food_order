@@ -101,7 +101,7 @@ func (s *Service) UpdateProfile(ctx context.Context, userID string, c ProfileCha
 // pending account too: the bot asks for the phone while the person registers.
 // The caller has checked that the phone is the person's own.
 func (s *Service) SetPhone(ctx context.Context, userID, rawPhone string) error {
-	phone, ok := normPhone(rawPhone)
+	phone, ok := NormPhone(rawPhone)
 	if !ok {
 		return fail("invalid_phone")
 	}

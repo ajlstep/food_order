@@ -1,263 +1,135 @@
-// Package api is catalog's HTTP API (port 9082), called by core and bot on
-// the internal network. Errors: {"error": {"code", "message"}}, the message
-// in Romanian. Only the allergen confirmation needs X-User-ID.
+// Package api says which subject is answered by which function: the doorway
+// of catalog. Catalog knows nothing about people: the only request that names
+// one is the allergen confirmation, and only to remember who confirmed.
 package api
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"io"
 	"log/slog"
-	"net/http"
-	"strconv"
 	"time"
 
-	"food-order/catalog/internal/bus"
-	"food-order/catalog/internal/applog"
-	"food-order/catalog/internal/contracts"
 	"food-order/catalog/internal/service"
+	"food-order/shared/contracts/catalog"
+	"food-order/shared/rpc"
 )
 
-// Pinger checks the database for /healthz.
-type Pinger interface {
-	Ping(ctx context.Context) error
-}
-
-// New returns the handler with every route. importOn enables POST /v1/import.
-func New(svc *service.Service, db Pinger, importOn bool, log *slog.Logger) http.Handler {
-	a := &api{svc: svc, log: log}
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-		defer cancel()
-		if err := db.Ping(ctx); err != nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "db_unavailable"})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-	})
-	mux.HandleFunc("GET /v1/menu", a.menu)
-	mux.HandleFunc("GET /v1/dishes", a.dishes)
-	mux.HandleFunc("GET /v1/dishes/{id}", a.dish)
-	mux.HandleFunc("POST /v1/similar", a.similar)
-	mux.HandleFunc("POST /v1/dishes/{id}/allergens/confirm", a.confirmAllergens)
-	if importOn {
-		mux.HandleFunc("POST /v1/import", a.importMenu)
-	}
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, http.StatusNotFound, "not_found", "Nu există așa ceva.")
-	})
-	return a.logRequests(mux)
-}
-
-type api struct {
+// Handlers answers the requests of catalog.
+type Handlers struct {
 	svc *service.Service
-	log *slog.Logger
 }
 
-func (a *api) menu(w http.ResponseWriter, r *http.Request) {
-	out, err := a.svc.Menu(r.Context(), r.URL.Query().Get("date"))
-	if a.fail(w, err) {
-		return
+// New makes the handlers.
+func New(svc *service.Service) *Handlers { return &Handlers{svc: svc} }
+
+// Routes is every subject with its handler, traced.
+func (h *Handlers) Routes(log *slog.Logger) map[string]rpc.Handler {
+	routes := map[string]rpc.Handler{
+		catalog.SubjectMenuGet:          h.menu,
+		catalog.SubjectMenuImport:       h.importMenu,
+		catalog.SubjectDishesGet:        h.dishes,
+		catalog.SubjectSimilar:          h.similar,
+		catalog.SubjectAllergensConfirm: h.confirmAllergens,
+		catalog.SubjectPartnersList:     h.partners,
 	}
-	writeJSON(w, http.StatusOK, out)
+	for subject, handler := range routes {
+		routes[subject] = traced(log, subject, handler)
+	}
+	return routes
 }
 
-func (a *api) dishes(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	out, err := a.svc.Dishes(r.Context(), q.Get("ids"), q.Get("date"))
-	if a.fail(w, err) {
-		return
+// Register connects the routes to the server.
+func (h *Handlers) Register(srv *rpc.Server, log *slog.Logger) error {
+	for subject, handler := range h.Routes(log) {
+		if err := srv.Handle(subject, handler); err != nil {
+			return err
+		}
 	}
-	writeJSON(w, http.StatusOK, out)
+	return nil
 }
 
-func (a *api) dish(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathID(w, r)
-	if !ok {
-		return
+func (h *Handlers) menu(ctx context.Context, req rpc.Request) (any, error) {
+	var in catalog.MenuGetRequest
+	if err := rpc.Decode(req, &in); err != nil {
+		return nil, err
 	}
-	out, err := a.svc.Dish(r.Context(), id, r.URL.Query().Get("date"))
-	if a.fail(w, err) {
-		return
-	}
-	writeJSON(w, http.StatusOK, out)
+	out, err := h.svc.Menu(ctx, in.Date)
+	return out, answer(err)
 }
 
-func (a *api) similar(w http.ResponseWriter, r *http.Request) {
-	var in contracts.SimilarRequest
-	if !readJSON(w, r, &in) {
-		return
+func (h *Handlers) importMenu(ctx context.Context, req rpc.Request) (any, error) {
+	var in catalog.MenuFetched
+	if err := rpc.Decode(req, &in); err != nil {
+		return nil, err
 	}
-	out, err := a.svc.Similar(r.Context(), in)
-	if a.fail(w, err) {
-		return
-	}
-	writeJSON(w, http.StatusOK, out)
+	out, err := h.svc.Import(ctx, in)
+	return out, answer(err)
 }
 
-func (a *api) confirmAllergens(w http.ResponseWriter, r *http.Request) {
-	v := r.Header.Get(contracts.HeaderUserID)
-	userID, err := strconv.ParseInt(v, 10, 64)
-	if v == "" || err != nil || userID <= 0 {
-		a.log.WarnContext(logCtx(w), "request without a valid X-User-ID", "value", v)
-		writeError(w, http.StatusBadRequest, "missing_user", "Lipsește antetul X-User-ID (id-ul utilizatorului din bot).")
-		return
+func (h *Handlers) dishes(ctx context.Context, req rpc.Request) (any, error) {
+	var in catalog.DishesGetRequest
+	if err := rpc.Decode(req, &in); err != nil {
+		return nil, err
 	}
-	id, ok := pathID(w, r)
-	if !ok {
-		return
-	}
-	var in contracts.ConfirmAllergensRequest
-	if !readJSON(w, r, &in) {
-		return
-	}
-	out, err := a.svc.ConfirmAllergens(r.Context(), userID, id, in.Allergens)
-	if a.fail(w, err) {
-		return
-	}
-	writeJSON(w, http.StatusOK, out)
+	out, err := h.svc.Dishes(ctx, in.IDs, in.Date)
+	return out, answer(err)
 }
 
-func (a *api) importMenu(w http.ResponseWriter, r *http.Request) {
-	var in contracts.MenuFetched
-	dec := json.NewDecoder(io.LimitReader(r.Body, 8<<20))
-	if err := dec.Decode(&in); err != nil {
-		a.log.WarnContext(logCtx(w), "import body is not valid JSON", "err", err)
-		writeError(w, http.StatusBadRequest, "bad_json", "Corpul cererii nu e JSON valid (aceeași formă ca data din food.menu.fetched).")
-		return
+func (h *Handlers) similar(ctx context.Context, req rpc.Request) (any, error) {
+	var in catalog.SimilarRequest
+	if err := rpc.Decode(req, &in); err != nil {
+		return nil, err
 	}
-	out, err := a.svc.Import(r.Context(), in)
-	if a.fail(w, err) {
-		return
+	out, err := h.svc.Similar(ctx, in)
+	return out, answer(err)
+}
+
+func (h *Handlers) confirmAllergens(ctx context.Context, req rpc.Request) (any, error) {
+	if req.UserID == "" {
+		return nil, rpc.NewError(rpc.CodeBadRequest, "the request has no user_id")
 	}
-	writeJSON(w, http.StatusOK, out)
-}
-
-func pathID(w http.ResponseWriter, r *http.Request) (int64, bool) {
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil || id <= 0 {
-		writeError(w, http.StatusBadRequest, "bad_id", "Id-ul felului nu e un număr.")
-		return 0, false
+	var in catalog.ConfirmAllergensRequest
+	if err := rpc.Decode(req, &in); err != nil {
+		return nil, err
 	}
-	return id, true
+	out, err := h.svc.ConfirmAllergens(ctx, req.UserID, in.DishID, in.Allergens)
+	return out, answer(err)
 }
 
-// fail writes the error answer; it returns true if there was an error.
-func (a *api) fail(w http.ResponseWriter, err error) bool {
-	if err == nil {
-		return false
+func (h *Handlers) partners(ctx context.Context, req rpc.Request) (any, error) {
+	var in catalog.PartnersListRequest
+	if err := rpc.Decode(req, &in); err != nil {
+		return nil, err
 	}
-	ctx := logCtx(w)
-	var se *service.Error
-	if errors.As(err, &se) {
-		a.log.InfoContext(ctx, "request refused", "status", se.Status, "code", se.Code, "message", se.Message)
-		writeError(w, se.Status, se.Code, se.Message)
-		return true
+	out, err := h.svc.Partners(ctx, in.Date)
+	return out, answer(err)
+}
+
+// answer turns a refusal of the service into what crosses the wire, with
+// the words for the person. Any other error stays as it is: rpc.Server logs
+// it and answers only "internal".
+func answer(err error) error {
+	var refused *service.Error
+	if errors.As(err, &refused) {
+		return rpc.Refuse(refused.Code, refused.Message)
 	}
-	a.log.ErrorContext(ctx, "request failed", "err", err)
-	writeError(w, http.StatusInternalServerError, "internal", "Eroare internă în catalog.")
-	return true
+	return err
 }
 
-func readJSON(w http.ResponseWriter, r *http.Request, out any) bool {
-	dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
-	if err := dec.Decode(out); err != nil {
-		slog.Default().WarnContext(logCtx(w), "request body is not valid JSON", "err", err)
-		writeError(w, http.StatusBadRequest, "bad_json", "Corpul cererii nu e JSON valid.")
-		return false
-	}
-	return true
-}
-
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-func writeError(w http.ResponseWriter, status int, code, msg string) {
-	writeJSON(w, status, contracts.ErrorBody{Error: contracts.ErrorDetail{Code: code, Message: msg}})
-}
-
-type statusWriter struct {
-	http.ResponseWriter
-	status int
-	bytes  int
-	ctx    context.Context // the request context with its log fields
-	log    *slog.Logger
-}
-
-func (s *statusWriter) WriteHeader(code int) {
-	s.status = code
-	s.ResponseWriter.WriteHeader(code)
-}
-
-func (s *statusWriter) Write(b []byte) (int, error) {
-	n, err := s.ResponseWriter.Write(b)
-	s.bytes += n
-	return n, err
-}
-
-// logRequests gives every request an id and its fields in the context
-// (req_id, method, path, user_id), so every log of the request carries
-// them, and logs the request itself: info for every call, warn for a 4xx, error for
-// a 5xx, debug for /healthz. The body is in the debug log.
-func (a *api) logRequests(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// traced writes a debug record for every request: what, how long, how it ended.
+func traced(log *slog.Logger, subject string, next rpc.Handler) rpc.Handler {
+	return func(ctx context.Context, req rpc.Request) (any, error) {
 		start := time.Now()
-		reqID := r.Header.Get("X-Request-ID")
-		if reqID == "" {
-			reqID = bus.NewID(start)
-		}
-		ctx := applog.With(r.Context(), "req_id", reqID, "http_method", r.Method, "http_path", r.URL.Path)
-		if u := r.Header.Get("X-User-ID"); u != "" {
-			ctx = applog.With(ctx, "user_id", u)
-		}
-		var body []byte
-		if r.Body != nil && r.ContentLength != 0 && a.log.Enabled(ctx, slog.LevelDebug) {
-			body, _ = io.ReadAll(io.LimitReader(r.Body, 1<<20))
-			r.Body = io.NopCloser(bytes.NewReader(body))
-		}
-		r = r.WithContext(ctx)
-		w.Header().Set("X-Request-ID", reqID)
-		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK, ctx: ctx, log: a.log}
-		a.log.DebugContext(ctx, "http request", "query", r.URL.RawQuery, "remote", r.RemoteAddr,
-			"user_agent", r.UserAgent(), "body", bodyForLog(body))
-		next.ServeHTTP(sw, r)
-		args := []any{"status", sw.status, "ms", applog.Since(start), "bytes", sw.bytes, "query", r.URL.RawQuery}
+		data, err := next(ctx, req)
+		outcome := "ok"
+		var re *rpc.Error
 		switch {
-		case r.URL.Path == "/healthz":
-			a.log.DebugContext(ctx, "http", args...)
-		case sw.status >= 500:
-			a.log.ErrorContext(ctx, "http", args...)
-		case sw.status >= 400:
-			a.log.WarnContext(ctx, "http", args...)
-		default:
-			a.log.InfoContext(ctx, "http", args...)
+		case errors.As(err, &re):
+			outcome = re.Code
+		case err != nil:
+			outcome = "failed"
 		}
-	})
-}
-
-// logCtx is the request context with its log fields (from logRequests).
-func logCtx(w http.ResponseWriter) context.Context {
-	if sw, ok := w.(*statusWriter); ok {
-		return sw.ctx
+		log.DebugContext(ctx, "rpc handled", "subject", subject, "outcome", outcome, "ms", time.Since(start).Milliseconds())
+		return data, err
 	}
-	return context.Background()
-}
-
-func bodyForLog(b []byte) any {
-	if len(b) == 0 {
-		return nil
-	}
-	if len(b) > 8<<10 {
-		return string(b[:8<<10]) + "…"
-	}
-	if json.Valid(b) {
-		return json.RawMessage(b)
-	}
-	return string(b)
 }

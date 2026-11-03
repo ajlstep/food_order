@@ -9,7 +9,7 @@ package permtest
 import (
 	"context"
 	"errors"
-	"os"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -25,6 +25,7 @@ import (
 
 var passwords = map[string]string{
 	"admin": "pw-admin", "gateway": "pw-gateway", "users": "pw-users", "bot": "pw-bot", "logs": "pw-logs",
+	"core": "pw-core", "catalog": "pw-catalog", "parser": "pw-parser",
 }
 
 // startServer runs nats.conf with the data directory in a temp folder.
@@ -237,6 +238,72 @@ func TestGatewayCannotPublishEvents(t *testing.T) {
 	g.forbidden(t, "gateway publishing food.*")
 }
 
+// The notifications: the gateway reads events only through its consumer and
+// writes only to the queues; the bot reads its queue. The same path as in
+// production, with the real permissions.
+func TestNotificationPath(t *testing.T) {
+	url := setup(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	js, err := jetstream.New(connect(t, url, "admin").nc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := js.Publish(ctx, "food.alert", []byte("event")); err != nil {
+		t.Fatal(err)
+	}
+
+	gw := connect(t, url, "gateway")
+	read := func(user *client, stream, consumer string) string {
+		t.Helper()
+		out := make(chan string, 1)
+		cctx, stop := context.WithCancel(ctx)
+		defer stop()
+		go func() {
+			_ = streams.Consume(cctx, user.nc, stream, consumer, func(_ context.Context, data []byte) error {
+				out <- string(data)
+				return nil
+			}, slog.New(slog.DiscardHandler))
+		}()
+		select {
+		case got := <-out:
+			return got
+		case <-ctx.Done():
+			t.Fatalf("nothing arrived on %s", consumer)
+			return ""
+		}
+	}
+	if got := read(gw, streams.Food, streams.ConsumerNotifier); got != "event" {
+		t.Fatalf("the gateway read %q", got)
+	}
+
+	gwJS, err := jetstream.New(gw.nc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gwJS.Publish(ctx, "notify.telegram", []byte("message")); err != nil {
+		t.Fatalf("the gateway cannot write to the queue: %v", err)
+	}
+	if got := read(connect(t, url, "bot"), streams.Notify, streams.ConsumerBotTelegram); got != "message" {
+		t.Fatalf("the bot read %q", got)
+	}
+}
+
+func TestGatewayCannotReadOtherConsumers(t *testing.T) {
+	url := setup(t)
+	gw := connect(t, url, "gateway")
+	js, err := jetstream.New(gw.nc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := js.Consumer(ctx, streams.Notify, streams.ConsumerBotTelegram); err == nil {
+		t.Fatal("the gateway must not reach the consumer of the bot")
+	}
+}
+
 func TestUsersCanLog(t *testing.T) {
 	url := setup(t)
 	u := connect(t, url, "users")
@@ -261,28 +328,19 @@ func TestWrongPasswordIsRefused(t *testing.T) {
 	}
 }
 
-// Transitional: a connection without a user still works, as "legacy".
-func TestOldServicesStillConnect(t *testing.T) {
+func TestNobodyWithoutAUser(t *testing.T) {
 	url := setup(t)
-	old := connect(t, url, "")
-	js, err := jetstream.New(old.nc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if _, err := js.Publish(ctx, "food.test", []byte("{}")); err != nil {
-		t.Fatalf("legacy cannot publish an event: %v", err)
+	if nc, err := nats.Connect(url); err == nil {
+		nc.Close()
+		t.Fatal("a connection without a user was accepted")
 	}
 }
-
-var _ = os.Getenv
 
 // The logger of every service asks JetStream if the stream LOGS exists; that
 // needs an inbox to receive the answer. (Found by running the real service.)
 func TestServicesCanCheckTheLogsStream(t *testing.T) {
 	url := setup(t)
-	for _, user := range []string{"users", "gateway", "bot"} {
+	for _, user := range []string{"users", "gateway", "bot", "core", "catalog", "parser"} {
 		js, err := jetstream.New(connect(t, url, user).nc)
 		if err != nil {
 			t.Fatal(err)
@@ -293,4 +351,122 @@ func TestServicesCanCheckTheLogsStream(t *testing.T) {
 		}
 		cancel()
 	}
+}
+
+// published says whether a user may put this event on the stream.
+func published(t *testing.T, url, user, subject string) error {
+	t.Helper()
+	js, err := jetstream.New(connect(t, url, user).nc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, err = js.Publish(ctx, subject, []byte("{}"))
+	return err
+}
+
+// Everybody publishes only the events that are theirs.
+func TestEventsHaveOneOwner(t *testing.T) {
+	url := setup(t)
+	allowed := map[string][]string{
+		"core":    {"food.menu.requested", "food.recommendation.ready", "food.rating.requested", "food.alert"},
+		"catalog": {"food.menu.ready", "food.dish.analyze.requested", "food.alert"},
+		"parser":  {"food.menu.fetched", "food.menu.error"},
+		"users":   {"food.org.invite", "food.org.notice"},
+	}
+	for user, subjects := range allowed {
+		for _, s := range subjects {
+			if err := published(t, url, user, s); err != nil {
+				t.Errorf("%s cannot publish %s: %v", user, s, err)
+			}
+		}
+	}
+	forbidden := map[string]string{
+		"core": "food.org.invite", "catalog": "food.menu.fetched", "parser": "food.recommendation.ready",
+		"users": "food.alert", "bot": "food.alert", "gateway": "food.org.notice",
+	}
+	for user, s := range forbidden {
+		if err := published(t, url, user, s); err == nil {
+			t.Errorf("%s may publish %s", user, s)
+		}
+	}
+}
+
+// Each service reads only its own consumer of FOOD.
+func TestServicesReadTheirOwnConsumer(t *testing.T) {
+	url := setup(t)
+	for _, name := range []string{"core", "catalog", "parser"} {
+		js, err := jetstream.New(connect(t, url, name).nc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		c, err := js.Consumer(ctx, streams.Food, name)
+		if err != nil {
+			t.Errorf("%s cannot reach its consumer: %v", name, err)
+			cancel()
+			continue
+		}
+		msgs, err := c.Fetch(1, jetstream.FetchMaxWait(200*time.Millisecond))
+		if err != nil {
+			t.Errorf("%s cannot read its consumer: %v", name, err)
+		} else if err := msgs.Error(); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+		other := "core"
+		if name == "core" {
+			other = "parser"
+		}
+		short, stop := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		if _, err := js.Consumer(short, streams.Food, other); err == nil {
+			t.Errorf("%s reached the consumer of %s", name, other)
+		}
+		stop()
+		cancel()
+	}
+}
+
+// core asks users and catalog only what it needs; the rest of users is
+// reached through the gateway, for the person who wrote.
+func TestCoreAsksOnlyWhatItNeeds(t *testing.T) {
+	url := setup(t)
+	u := connect(t, url, "users")
+	cat := connect(t, url, "catalog")
+	for _, s := range []struct {
+		c       *client
+		subject string
+	}{{u, "rpc.users.profile.food.get"}, {u, "rpc.users.profile.due"}, {u, "rpc.users.org.snapshot"},
+		{u, "rpc.users.org.company.get"}, {cat, "rpc.catalog.menu.get"}, {cat, "rpc.catalog.similar"}} {
+		if _, err := s.c.nc.Subscribe(s.subject, func(m *nats.Msg) { _ = m.Respond([]byte("{}")) }); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.c.nc.Flush(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	core := connect(t, url, "core")
+	for _, s := range []string{"rpc.users.profile.food.get", "rpc.users.profile.due", "rpc.users.org.snapshot", "rpc.catalog.similar"} {
+		if _, err := core.nc.Request(s, []byte("{}"), 2*time.Second); err != nil {
+			t.Errorf("core cannot ask %s: %v", s, err)
+		}
+	}
+	if err := core.nc.Publish("rpc.users.profile.get", []byte("{}")); err != nil {
+		t.Fatal(err)
+	}
+	core.forbidden(t, "core asking for a whole profile")
+}
+
+func TestCoreAndCatalogListenOnlyToThemselves(t *testing.T) {
+	url := setup(t)
+	c := connect(t, url, "core")
+	if _, err := c.nc.Subscribe("rpc.users.>", func(*nats.Msg) {}); err != nil {
+		t.Fatal(err)
+	}
+	c.forbidden(t, "core listening to users")
+	p := connect(t, url, "parser")
+	if _, err := p.nc.Subscribe("rpc.core.>", func(*nats.Msg) {}); err != nil {
+		t.Fatal(err)
+	}
+	p.forbidden(t, "parser listening to core")
 }

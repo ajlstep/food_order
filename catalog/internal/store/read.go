@@ -10,7 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"food-order/catalog/internal/contracts"
+	contracts "food-order/shared/contracts/catalog"
+	"food-order/shared/contracts/food"
 )
 
 // ------------------------------------------------------------ dish views
@@ -132,7 +133,7 @@ func (s *Store) DishExists(ctx context.Context, id int64) (bool, error) {
 // ConfirmAllergens saves a user's confirmation of a dish's allergens (an
 // empty list = "no allergens"). The dish is shared, so the confirmation is
 // too; who confirmed is kept only as an id.
-func (s *Store) ConfirmAllergens(ctx context.Context, dishID int64, allergens []string, userID int64, now time.Time) error {
+func (s *Store) ConfirmAllergens(ctx context.Context, dishID int64, allergens []string, userID string, now time.Time) error {
 	if allergens == nil {
 		allergens = []string{}
 	}
@@ -226,17 +227,17 @@ func (s *Store) dishIDs(ctx context.Context, from, to string) ([]int64, error) {
 }
 
 // ReadyToPublish returns the ready requests whose food.menu.ready is not out yet.
-func (s *Store) ReadyToPublish(ctx context.Context) ([]contracts.MenuReady, error) {
+func (s *Store) ReadyToPublish(ctx context.Context) ([]food.MenuReady, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT request_id, date_from, date_to, COALESCE(dish_ids, '[]') FROM menu_requests
 		WHERE status = 'ready' AND published_at IS NULL ORDER BY ready_at`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []contracts.MenuReady
+	var out []food.MenuReady
 	for rows.Next() {
 		var (
-			m   contracts.MenuReady
+			m   food.MenuReady
 			ids string
 		)
 		if err := rows.Scan(&m.RequestID, &m.From, &m.To, &ids); err != nil {

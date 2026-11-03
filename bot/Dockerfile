@@ -1,16 +1,18 @@
+# Build context is the project root (see docker-compose.yml), because the bot
+# needs the shared module that lives next to it.
 FROM golang:1.25-alpine AS build
 WORKDIR /src
-COPY go.mod go.sum ./
+COPY shared/ ./shared/
+COPY bot/go.mod bot/go.sum ./bot/
+WORKDIR /src/bot
 RUN go mod download
-COPY . .
+COPY bot/ ./
 RUN CGO_ENABLED=0 go build -o /out/bot .
 
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates && adduser -D app && mkdir /data && chown app /data
+RUN apk add --no-cache ca-certificates && adduser -D app
 COPY --from=build /out/bot /usr/local/bin/bot
 USER app
-ENV BOT_DB_PATH=/data/bot.db
-VOLUME /data
-EXPOSE 9001
-HEALTHCHECK --interval=30s --timeout=3s CMD wget -qO- http://127.0.0.1:9001/healthz || exit 1
+EXPOSE 8086
+HEALTHCHECK --interval=30s --timeout=3s CMD wget -qO- http://127.0.0.1:8086/healthz || exit 1
 ENTRYPOINT ["bot"]

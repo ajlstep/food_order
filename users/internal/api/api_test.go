@@ -18,6 +18,7 @@ import (
 	"food-order/users/internal/auth"
 	"food-order/users/internal/db"
 	"food-order/users/internal/mailer"
+	"food-order/users/internal/org"
 	"food-order/users/internal/profile"
 )
 
@@ -27,6 +28,11 @@ type env struct {
 	mail   *mailer.Fake
 	email  *auth.EmailService
 }
+
+// noEvents is a publisher that drops everything.
+type noEvents struct{}
+
+func (noEvents) Publish(context.Context, string, any) error { return nil }
 
 func start(t *testing.T) *env {
 	t.Helper()
@@ -56,7 +62,7 @@ func start(t *testing.T) *env {
 	mail := &mailer.Fake{}
 	email := auth.NewEmailService(store, mail, auth.EmailRules{CodeTTL: 30 * time.Minute, Resend: 30 * time.Second, MaxAttempts: 5, PerHour: 5},
 		"test-secret-0123456789", log, time.Now)
-	if err := Register(rpc.NewServer(nc, log, "users"), log, auth.NewHandler(auth.NewResolver(store, log, time.Now), email), profile.NewHandler(profile.NewService(profile.NewSQLStore(database), log, time.Now))); err != nil {
+	if err := Register(rpc.NewServer(nc, log, "users"), log, auth.NewHandler(auth.NewResolver(store, log, time.Now), email), profile.NewHandler(profile.NewService(profile.NewSQLStore(database), log, time.Now)), org.NewHandler(org.NewService(org.NewSQLStore(database), noEvents{}, log, time.Now))); err != nil {
 		t.Fatal(err)
 	}
 	if err := nc.Flush(); err != nil {

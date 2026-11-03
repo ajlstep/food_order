@@ -21,6 +21,7 @@ const (
 	SubjectProfileLocationsDel  = "rpc.users.profile.locations.delete"
 	SubjectProfileLocationsMain = "rpc.users.profile.locations.default"
 	SubjectProfileChannelsGet   = "rpc.users.profile.channels.get"
+	SubjectProfileDue           = "rpc.users.profile.due" // who has the order time now, for core
 )
 
 // Error codes of the profile zone.
@@ -37,6 +38,13 @@ const (
 	SettingRecFor         = "rec_for"         // "today" | "tomorrow": the day a recommendation is for
 	SettingNotifyPersonal = "notify_personal" // "true" | "false"
 	SettingNotifyGroup    = "notify_group"    // "true" | "false"
+	SettingOrderTo        = "order_to"        // "group" | "personal": whose address an order goes to
+)
+
+// Values of SettingOrderTo.
+const (
+	OrderToGroup    = "group"
+	OrderToPersonal = "personal"
 )
 
 // Kinds of preferences. Allergens are separate (see AllergensRequest).
@@ -141,4 +149,21 @@ type Channel struct {
 type ChannelsResponse struct {
 	Channels []Channel `json:"channels"`
 	Latest   string    `json:"latest"` // channel name, "" if none is active
+}
+
+// DueRequest asks who has the order time at AtMs or in the Window before it.
+type DueRequest struct {
+	AtMs          int64 `json:"at_ms"`
+	WindowMinutes int   `json:"window_minutes"`
+}
+
+// DueItem is a person who should get a recommendation, and for which day.
+type DueItem struct {
+	UserID  string `json:"user_id"`
+	ForDate string `json:"for_date"` // 2026-11-04
+}
+
+// DueResponse lists them.
+type DueResponse struct {
+	Items []DueItem `json:"items"`
 }

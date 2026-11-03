@@ -1,5 +1,5 @@
 // Package store is core's own SQLite database (core.db). Nobody else opens
-// it. Everything about a person is kept per user_id (users.id from bot.db);
+// it. Everything about a person is kept per user_id (from the users service);
 // there is no users table here and no dishes table: orders keep the dish_id
 // from catalog plus a snapshot of the dish at the moment of the order.
 package store
@@ -56,16 +56,13 @@ func Open(path string) (*Store, error) {
 // Close closes the database.
 func (s *Store) Close() error { return s.db.Close() }
 
-// Ping checks the database (for /healthz).
-func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
-
 // migrations: append new steps, never change old ones.
 var migrations = []string{
 	// 1: the schema from the notes (projects/food-order/Core), plus the
 	// bookkeeping columns the scheduler needs (marked "+").
 	`CREATE TABLE orders (
 		id INTEGER PRIMARY KEY,
-		user_id INTEGER NOT NULL,          -- users.id from bot.db (no FK: other database)
+		user_id TEXT NOT NULL,             -- from the users service (no FK: other service)
 		date TEXT NOT NULL,                -- 2026-10-28, the day of the meal
 		dish_id INTEGER NOT NULL,          -- id from catalog (no FK: other database)
 		price REAL,
@@ -83,6 +80,15 @@ var migrations = []string{
 		carbs_g_min REAL,   carbs_g_max REAL,
 		nutrition_source TEXT,             -- llm | kitchen | missing
 
+		-- where it goes, as it was when the person chose; empty = personal
+		group_id TEXT,
+		group_name TEXT,
+		company_id TEXT,
+		company_name TEXT,
+		address TEXT,
+		lat REAL,
+		lon REAL,
+
 		kitchen_feedback TEXT,             -- + one sentence for the kitchen (llm)
 		rating_requested_at TEXT,          -- + when food.rating.requested went out
 		rated_at TEXT,                     -- +
@@ -90,19 +96,11 @@ var migrations = []string{
 		updated_at TEXT NOT NULL           -- +
 	);
 	CREATE INDEX idx_orders_user_date ON orders(user_id, date);
-
-	CREATE TABLE prefs (
-		id INTEGER PRIMARY KEY,
-		user_id INTEGER NOT NULL,
-		kind TEXT NOT NULL,                -- allergen | dislike | like | diet | target
-		value TEXT NOT NULL,
-		hard INTEGER DEFAULT 0             -- 1 = hard filter
-	);
-	CREATE INDEX idx_prefs_user ON prefs(user_id);
+	CREATE INDEX idx_orders_company_date ON orders(company_id, date);
 
 	CREATE TABLE recommendations (
 		id INTEGER PRIMARY KEY,
-		user_id INTEGER NOT NULL,
+		user_id TEXT NOT NULL,
 		date TEXT NOT NULL,
 		request_id TEXT NOT NULL UNIQUE,
 		status TEXT NOT NULL,              -- waiting_menu | generating | ready

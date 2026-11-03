@@ -54,6 +54,34 @@ const (
 	LocationsDefault = "POST /v1/me/locations/{id}/default"
 	ChannelsGet      = "GET /v1/me/channels"
 
+	// Food. Active accounts too; the person goes in the envelope.
+	RecommendationCreate = "POST /v1/recommendations"               // {"date": "..."}
+	RecommendationGet    = "GET /v1/recommendations"                // ?date=
+	OrderCreate          = "POST /v1/orders"                        // core.CreateOrderRequest
+	OrderRate            = "POST /v1/orders/{id}/rating"            // {"rating": 5, "comment": "..."}
+	OrdersList           = "GET /v1/orders"                         // ?from=&to=
+	StatsGet             = "GET /v1/stats"                          // ?from=&to=
+	AllergensConfirm     = "POST /v1/dishes/{id}/allergens/confirm" // {"allergens": [...]}
+	PartnersList         = "GET /v1/partners"                       // ?date=
+
+	// Companies, groups, invitations.
+	CompanyGet    = "GET /v1/me/company"
+	CompanyCreate = "POST /v1/me/company"
+	CompanyUpdate = "PATCH /v1/me/company"
+	CompanyLeave  = "POST /v1/me/company/leave"
+	CompanyInvite = "POST /v1/me/company/invite"
+	CompanyRemove = "DELETE /v1/me/company/members/{id}"
+	CompanyReport = "GET /v1/me/company/report" // ?from=&to=
+	GroupGet      = "GET /v1/me/group"
+	GroupCreate   = "POST /v1/me/group"
+	GroupDelete   = "DELETE /v1/me/group"
+	GroupLeave    = "POST /v1/me/group/leave"
+	GroupInvite   = "POST /v1/me/group/invite"
+	GroupRemove   = "DELETE /v1/me/group/members/{id}"
+	InvitesList   = "GET /v1/me/invites"
+	InviteAccept  = "POST /v1/me/invites/{id}/accept"
+	InviteDecline = "POST /v1/me/invites/{id}/decline"
+
 	Health = "GET /healthz" // no key needed
 )
 

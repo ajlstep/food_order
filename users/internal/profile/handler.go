@@ -2,6 +2,7 @@ package profile
 
 import (
 	"context"
+	"time"
 
 	"food-order/shared/contracts/users"
 	"food-order/shared/rpc"
@@ -63,6 +64,27 @@ func (h *Handler) PhoneSet(ctx context.Context, req rpc.Request) (any, error) {
 		return nil, err
 	}
 	return nil, refusal.ToRPC(h.svc.SetPhone(ctx, in.UserID, in.Phone))
+}
+
+// Due answers rpc.users.profile.due. It is for core, and is about everybody;
+// the rights in nats.conf say who may ask, and the gateway has no route to it.
+func (h *Handler) Due(ctx context.Context, req rpc.Request) (any, error) {
+	var in users.DueRequest
+	if err := rpc.Decode(req, &in); err != nil {
+		return nil, err
+	}
+	if in.WindowMinutes <= 0 {
+		return nil, rpc.NewError(rpc.CodeBadRequest, "window_minutes must be positive")
+	}
+	items, err := h.svc.Due(ctx, time.UnixMilli(in.AtMs), time.Duration(in.WindowMinutes)*time.Minute)
+	if err != nil {
+		return nil, err
+	}
+	out := users.DueResponse{Items: make([]users.DueItem, 0, len(items))}
+	for _, it := range items {
+		out.Items = append(out.Items, users.DueItem{UserID: it.UserID, ForDate: it.ForDate})
+	}
+	return out, nil
 }
 
 // SettingsGet answers rpc.users.profile.settings.get.

@@ -5,9 +5,9 @@ import (
 	"errors"
 	"time"
 
-	"food-order/core/internal/bus"
-	"food-order/core/internal/contracts"
 	"food-order/core/internal/store"
+	"food-order/shared/contracts/food"
+	"food-order/shared/events"
 )
 
 // The menu is shared: one request for a day serves every user. Core only
@@ -45,7 +45,7 @@ func (s *Service) ensureMenu(ctx context.Context, date string, onDemand bool) er
 	}
 	now := s.Now()
 	m = store.MenuRequest{
-		RequestID: bus.NewID(now), DateFrom: date, DateTo: date, Status: store.MenuRequested,
+		RequestID: events.NewID(now), DateFrom: date, DateTo: date, Status: store.MenuRequested,
 		Attempts: 1, RequestedAt: now.UTC().Format(store.TimeFormat),
 	}
 	if err := s.Store.CreateMenuRequest(ctx, m, now); err != nil {
@@ -53,7 +53,7 @@ func (s *Service) ensureMenu(ctx context.Context, date string, onDemand bool) er
 	}
 	s.Log.InfoContext(ctx, "menu requested", "request_id", m.RequestID, "date", date, "on_demand", onDemand)
 	// if this fails the request expires after CORE_MENU_TIMEOUT and is resent
-	_ = s.publish(ctx, contracts.SubjectMenuRequested, contracts.MenuRequested{RequestID: m.RequestID, From: date, To: date})
+	_ = s.publish(ctx, food.SubjectMenuRequested, food.MenuRequested{RequestID: m.RequestID, From: date, To: date})
 	return nil
 }
 
@@ -69,13 +69,13 @@ func (s *Service) resendMenu(ctx context.Context, m store.MenuRequest) error {
 		return err
 	}
 	s.Log.InfoContext(ctx, "menu requested again", "request_id", m.RequestID, "date", m.DateFrom, "attempt", m.Attempts)
-	_ = s.publish(ctx, contracts.SubjectMenuRequested, contracts.MenuRequested{RequestID: m.RequestID, From: m.DateFrom, To: m.DateTo})
+	_ = s.publish(ctx, food.SubjectMenuRequested, food.MenuRequested{RequestID: m.RequestID, From: m.DateFrom, To: m.DateTo})
 	return nil
 }
 
 // OnMenuReady handles food.menu.ready: the menu is in catalog, so every
 // recommendation waiting for those days can be generated now.
-func (s *Service) OnMenuReady(ctx context.Context, ev contracts.MenuReady) error {
+func (s *Service) OnMenuReady(ctx context.Context, ev food.MenuReady) error {
 	if ev.To == "" {
 		ev.To = ev.From
 	}
@@ -144,7 +144,7 @@ func (s *Service) regenerate(ctx context.Context, date string) {
 			s.Log.DebugContext(ctx, "regenerate skipped", "user_id", old.UserID, "date", date, "already_chose", chose, "err", err)
 			continue
 		}
-		rec, err := s.Store.CreateRec(ctx, old.UserID, date, bus.NewID(s.Now()), s.Now())
+		rec, err := s.Store.CreateRec(ctx, old.UserID, date, events.NewID(s.Now()), s.Now())
 		if err == nil {
 			err = s.generate(ctx, rec)
 		}
@@ -155,7 +155,7 @@ func (s *Service) regenerate(ctx context.Context, date string) {
 }
 
 // OnMenuError handles food.menu.error from the source.
-func (s *Service) OnMenuError(ctx context.Context, ev contracts.MenuError) error {
+func (s *Service) OnMenuError(ctx context.Context, ev food.MenuError) error {
 	m, err := s.Store.MenuRequestByID(ctx, ev.RequestID)
 	if errors.Is(err, store.ErrNotFound) {
 		s.Log.WarnContext(ctx, "menu error for an unknown request", "request_id", ev.RequestID, "code", ev.Code)
@@ -194,13 +194,13 @@ func (s *Service) menuFailed(ctx context.Context, m store.MenuRequest, code, msg
 	}
 
 	switch code {
-	case contracts.MenuErrNoMenu:
+	case food.MenuErrNoMenu:
 		if !retryAt(now.Add(s.Cfg.MenuRetryInterval)) && !m.Alerted {
 			m.Alerted = true
 			s.alert(ctx, "warn", "Meniul pentru %s încă nu a apărut, iar ora limită (%s) a trecut. Nu mai reîncerc.",
 				m.DateFrom, deadline.In(s.Cfg.Location).Format("02.01 15:04"))
 		}
-	case contracts.MenuErrSourceUnavailable:
+	case food.MenuErrSourceUnavailable:
 		will := retryAt(now.Add(s.backoff(m.Attempts)))
 		if !m.Alerted && (m.Attempts >= s.Cfg.MenuMaxAttempts || !will) {
 			m.Alerted = true
@@ -210,7 +210,7 @@ func (s *Service) menuFailed(ctx context.Context, m store.MenuRequest, code, msg
 			}
 			s.alert(ctx, "error", "Sursa meniului nu răspunde pentru %s (%d încercări): %s. %s", m.DateFrom, m.Attempts, msg, tail)
 		}
-	case contracts.MenuErrParseFailed:
+	case food.MenuErrParseFailed:
 		m.Alerted = true
 		s.alert(ctx, "error", "Sursa meniului nu mai înțelege pagina pentru %s (site-ul s-a schimbat?): %s. Nu reîncerc.", m.DateFrom, msg)
 	default: // bad_request or a code core does not know

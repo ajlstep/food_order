@@ -38,7 +38,7 @@ func TestReopen(t *testing.T) {
 func TestOrders(t *testing.T) {
 	ctx := context.Background()
 	s := open(t)
-	o, err := s.SaveOrder(ctx, Order{UserID: 7, Date: "2026-10-31", DishID: 12, Price: f(63),
+	o, err := s.SaveOrder(ctx, Order{UserID: "u7", Date: "2026-10-31", DishID: 12, Price: f(63),
 		Snapshot: Snapshot{DishName: "LUNCH 1 Stand", KcalMin: f(600), KcalMax: f(800), NutritionSource: "llm"}}, now)
 	if err != nil {
 		t.Fatal(err)
@@ -48,31 +48,31 @@ func TestOrders(t *testing.T) {
 	}
 
 	// a second choice the same day replaces the first
-	o2, err := s.SaveOrder(ctx, Order{UserID: 7, Date: "2026-10-31", DishID: 15, Forced: true,
+	o2, err := s.SaveOrder(ctx, Order{UserID: "u7", Date: "2026-10-31", DishID: 15, Forced: true,
 		Snapshot: Snapshot{DishName: "LUNCH 2", NutritionSource: "missing"}}, now)
 	if err != nil || o2.ID != o.ID || o2.DishID != 15 || !o2.Forced || o2.KcalMin != nil {
 		t.Fatalf("replace: %+v %v", o2, err)
 	}
 
 	// other users don't see it
-	if _, err := s.Order(ctx, 8, o.ID); !errors.Is(err, ErrNotFound) {
+	if _, err := s.Order(ctx, "u8", o.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("other user: %v", err)
 	}
-	if _, err := s.Rate(ctx, 8, o.ID, 5, "", now); !errors.Is(err, ErrNotFound) {
+	if _, err := s.Rate(ctx, "u8", o.ID, 5, "", now); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("other user rate: %v", err)
 	}
 
-	r, err := s.Rate(ctx, 7, o.ID, 4, "prea sărat", now)
+	r, err := s.Rate(ctx, "u7", o.ID, 4, "prea sărat", now)
 	if err != nil || *r.Rating != 4 || r.Comment != "prea sărat" {
 		t.Fatalf("rate: %+v %v", r, err)
 	}
-	if _, err := s.SaveOrder(ctx, Order{UserID: 7, Date: "2026-10-31", DishID: 18, Snapshot: Snapshot{DishName: "x"}}, now); !errors.Is(err, ErrRated) {
+	if _, err := s.SaveOrder(ctx, Order{UserID: "u7", Date: "2026-10-31", DishID: 18, Snapshot: Snapshot{DishName: "x"}}, now); !errors.Is(err, ErrRated) {
 		t.Fatalf("change after rating: %v", err)
 	}
 	if err := s.SetLabels(ctx, o.ID, []byte(`{"sărat":"prea mult"}`), "Prea sărat.", now); err != nil {
 		t.Fatal(err)
 	}
-	list, err := s.Orders(ctx, 7, "2026-10-01", "2026-10-31")
+	list, err := s.Orders(ctx, "u7", "2026-10-01", "2026-10-31")
 	if err != nil || len(list) != 1 || list[0].Labels == "" || list[0].KitchenFeedback != "Prea sărat." {
 		t.Fatalf("list: %+v %v", list, err)
 	}
@@ -81,8 +81,8 @@ func TestOrders(t *testing.T) {
 func TestRatingQuestions(t *testing.T) {
 	ctx := context.Background()
 	s := open(t)
-	a, _ := s.SaveOrder(ctx, Order{UserID: 1, Date: "2026-10-29", DishID: 1, Snapshot: Snapshot{DishName: "a"}}, now)
-	_, _ = s.SaveOrder(ctx, Order{UserID: 2, Date: "2026-10-30", DishID: 1, Snapshot: Snapshot{DishName: "a"}}, now)
+	a, _ := s.SaveOrder(ctx, Order{UserID: "u1", Date: "2026-10-29", DishID: 1, Snapshot: Snapshot{DishName: "a"}}, now)
+	_, _ = s.SaveOrder(ctx, Order{UserID: "u2", Date: "2026-10-30", DishID: 1, Snapshot: Snapshot{DishName: "a"}}, now)
 	list, err := s.OrdersToAskRating(ctx, "2026-10-27", "2026-10-29")
 	if err != nil || len(list) != 1 || list[0].ID != a.ID {
 		t.Fatalf("to ask: %+v %v", list, err)
@@ -93,30 +93,10 @@ func TestRatingQuestions(t *testing.T) {
 	}
 }
 
-func TestPrefs(t *testing.T) {
-	ctx := context.Background()
-	s := open(t)
-	if err := s.ReplacePrefs(ctx, 3, []Pref{{Kind: "allergen", Value: "nuci", Hard: true}, {Kind: "like", Value: "ciorbă"}}); err != nil {
-		t.Fatal(err)
-	}
-	_ = s.ReplacePrefs(ctx, 4, []Pref{{Kind: "like", Value: "pește"}})
-	ps, err := s.Prefs(ctx, 3)
-	if err != nil || len(ps) != 2 || !ps[0].Hard || ps[1].Value != "ciorbă" {
-		t.Fatalf("prefs: %+v %v", ps, err)
-	}
-	_ = s.ReplacePrefs(ctx, 3, nil)
-	if ps, _ = s.Prefs(ctx, 3); len(ps) != 0 {
-		t.Fatalf("cleared: %+v", ps)
-	}
-	if ps, _ = s.Prefs(ctx, 4); len(ps) != 1 {
-		t.Fatalf("other user touched: %+v", ps)
-	}
-}
-
 func TestRecommendations(t *testing.T) {
 	ctx := context.Background()
 	s := open(t)
-	r, err := s.CreateRec(ctx, 5, "2026-10-31", "req-1", now)
+	r, err := s.CreateRec(ctx, "u5", "2026-10-31", "req-1", now)
 	if err != nil || r.Status != RecWaitingMenu {
 		t.Fatalf("create: %+v %v", r, err)
 	}

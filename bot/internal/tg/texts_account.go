@@ -7,7 +7,7 @@ import (
 	"github.com/go-telegram/bot/models"
 
 	"food-order/bot/internal/settings"
-	"food-order/bot/internal/store"
+	"food-order/shared/contracts/users"
 )
 
 // Texts for connecting, profile and settings.
@@ -17,31 +17,52 @@ const (
 	btnNotNow     = "Nu acum"
 )
 
-func welcomeText(u store.User, s settings.Settings) string {
-	name := u.FirstName
-	if name == "" {
-		name = "acolo"
-	}
-	return fmt.Sprintf("👋 Salut, %s! Te-am conectat.\n\n"+
-		"La <b>ora de comandă</b>, în <b>zilele de comandă</b>, îți trimit singur recomandarea pentru următoarea zi de comandă. Acum:\n%s\n\n"+
-		"Le schimbi cu /setari. Ce nu mănânci și alergenii — /preferinte.\n\n"+
-		"Dacă vrei, trimite-mi și numărul de telefon (butonul de jos). E opțional.",
-		esc(name), settingsSummary(s))
+const (
+	askEmailText = "👋 Salut! Ca să începem, scrie adresa ta de email. Îți trimit un cod de confirmare."
+
+	serviceDownText = "Serviciul nu răspunde acum. Încearcă din nou puțin mai târziu."
+
+	accountClosedText = "Contul tău nu e activ. Scrie-i administratorului."
+
+	stoppedText = "⏸ Am oprit notificările. Datele tale rămân.\nTrimite /start ca să le primești din nou."
+)
+
+func codeSentText(email string, minutes int) string {
+	return fmt.Sprintf("📧 Am trimis un cod pe <b>%s</b>.\n\n<b>Poate ajunge în Spam</b>, caută-l și acolo. "+
+		"Codul e valabil %d de minute. Scrie-l aici.", esc(email), minutes)
 }
 
-func welcomeBackText(u store.User) string {
-	name := u.FirstName
+func confirmedText(result string) string {
+	if result == users.ConfirmAttached {
+		return "✅ Emailul e confirmat. Aveai deja un cont, așa că am legat acest chat de el."
+	}
+	return "✅ Emailul e confirmat. Contul e gata. Setările tale:"
+}
+
+func waitText(what string, seconds int) string {
+	if seconds <= 0 {
+		return what + " Încearcă puțin mai târziu."
+	}
+	return fmt.Sprintf("%s Încearcă din nou peste %d de secunde.", what, seconds)
+}
+
+func wrongCodeText(attemptsLeft int) string {
+	return fmt.Sprintf("Codul nu e bun. Mai ai %d încercări.", attemptsLeft)
+}
+
+func welcomeBackText(name string) string {
 	if name == "" {
 		name = "din nou"
 	}
-	return fmt.Sprintf("👋 Bine ai revenit, %s! Primești din nou recomandările.\n\n%s", esc(name), helpText)
+	return fmt.Sprintf("👋 Bine ai revenit, %s! Primești din nou notificările.\n\n%s", esc(name), helpText)
 }
 
-const stoppedText = "⏸ Am oprit recomandările automate. Datele tale rămân.\nTrimite /start ca să revii."
-
-const needStartText = "👋 Nu te cunosc încă. Trimite /start ca să te conectez."
-
-const stoppedNeedStartText = "⏸ Ai oprit botul. Trimite /start ca să revii."
+func signupKeyboard() models.InlineKeyboardMarkup {
+	return models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{{
+		{Text: "🔁 Trimite din nou", CallbackData: encodeResend()},
+		{Text: "✏️ Alt email", CallbackData: encodeOtherEmail()},
+	}}}
+}
 
 func settingsSummary(s settings.Settings) string {
 	var b strings.Builder
@@ -55,7 +76,7 @@ func settingsText(s settings.Settings) string {
 	var b strings.Builder
 	b.WriteString("⚙️ <b>Setările mele</b>\n\n")
 	b.WriteString(settingsSummary(s))
-	b.WriteString("\n\nApasă pe zile ca să le bifezi, ±30 min pentru oră, sau scrie:\n")
+	b.WriteString("\n\nApasă pe butoane sau scrie:\n")
 	for _, d := range settings.Defs {
 		fmt.Fprintf(&b, "<code>%s</code>\n", esc(d.Help))
 	}
@@ -79,33 +100,55 @@ func settingsKeyboard(s settings.Settings) models.InlineKeyboardMarkup {
 			{Text: "🕐 −30 min", CallbackData: encodeTime(-30)},
 			{Text: "🕐 +30 min", CallbackData: encodeTime(30)},
 		},
+		{toggleButton(s, "🍽", settings.KeyRecFor)},
+		{toggleButton(s, "🔔", settings.KeyNotifyPersonal)},
+		{toggleButton(s, "👥", settings.KeyNotifyGroup)},
+		{toggleButton(s, "📍", settings.KeyOrderTo)},
 	}}
 }
 
-func profileText(u store.User) string {
+// toggleButton shows a setting with two values and its value now.
+func toggleButton(s settings.Settings, icon, key string) models.InlineKeyboardButton {
+	def, _ := settings.Find(key) // the keys above are all in settings.Defs
+	return models.InlineKeyboardButton{
+		Text:         icon + " " + def.Label + ": " + def.Format(s[key]),
+		CallbackData: encodeToggle(key),
+	}
+}
+
+func profileText(p users.ProfileResponse, c users.ChannelsResponse) string {
 	var b strings.Builder
 	b.WriteString("👤 <b>Profilul meu</b>\n\n")
-	name := strings.TrimSpace(u.FirstName + " " + u.LastName)
-	if name == "" {
-		name = "—"
-	}
-	fmt.Fprintf(&b, "Nume: %s\n", esc(name))
-	if u.Username != "" {
-		fmt.Fprintf(&b, "Nickname: @%s\n", esc(u.Username))
-	} else {
-		b.WriteString("Nickname: —\n")
-	}
-	if u.Phone != "" {
-		fmt.Fprintf(&b, "Telefon: %s\n", esc(u.Phone))
+	fmt.Fprintf(&b, "Nume: %s\n", esc(orDash(p.DisplayName)))
+	fmt.Fprintf(&b, "Email: %s\n", esc(orDash(p.Email)))
+	if p.Phone != "" {
+		fmt.Fprintf(&b, "Telefon: %s\n", esc(p.Phone))
 	} else {
 		b.WriteString("Telefon: — (îl poți trimite cu butonul de jos)\n")
 	}
-	fmt.Fprintf(&b, "Id în sistem: <code>%d</code>\n", u.ID)
-	if !u.CreatedAt.IsZero() {
-		fmt.Fprintf(&b, "Conectat din: %s\n", u.CreatedAt.Format("02.01.2006"))
+	fmt.Fprintf(&b, "Id în sistem: <code>%s</code>\n", esc(p.UserID))
+	for _, ch := range c.Channels {
+		fmt.Fprintf(&b, "Canal: %s (%s)\n", esc(ch.Channel), channelStatusName(ch.Status))
 	}
-	b.WriteString("\nNumele și nickname-ul le iau din Telegram și se actualizează singure.\n/stop — opresc recomandările automate.")
+	b.WriteString("\n/stop — opresc notificările.")
 	return b.String()
+}
+
+func channelStatusName(status string) string {
+	switch status {
+	case users.IdentityActive:
+		return "activ"
+	case users.IdentityStopped:
+		return "oprit"
+	}
+	return "blocat"
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "—"
+	}
+	return s
 }
 
 func phoneKeyboard() models.ReplyKeyboardMarkup {

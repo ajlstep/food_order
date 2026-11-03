@@ -1,8 +1,9 @@
 // Command users is the service that knows who the people are: accounts,
-// channels (Telegram, ...), email confirmation. It talks only over NATS.
+// channels (Telegram, ...), email confirmation, what they set about
+// themselves, companies and groups. It talks only over NATS.
 //
 // main only starts things: it reads the settings, builds the pieces, joins
-// them and waits for the stop signal. The rules are in internal/auth.
+// them and waits for the stop signal. The rules are in internal/auth, internal/profile and internal/org.
 //
 // Settings: internal/config, see .env.example.
 package main
@@ -18,6 +19,7 @@ import (
 	_ "time/tzdata" // time zones inside the binary: settings are checked against them, and the image may have none
 
 	"food-order/shared/bus"
+	"food-order/shared/events"
 	"food-order/shared/rpc"
 	"food-order/users/internal/api"
 	"food-order/users/internal/applog"
@@ -25,6 +27,7 @@ import (
 	"food-order/users/internal/config"
 	"food-order/users/internal/db"
 	"food-order/users/internal/mailer"
+	"food-order/users/internal/org"
 	"food-order/users/internal/profile"
 )
 
@@ -74,11 +77,18 @@ func run(envFile string) error {
 		return err
 	}
 
+	publisher, err := events.NewPublisher(nc, log.Logger)
+	if err != nil {
+		log.Fatal("cannot publish events", "err", err)
+		return err
+	}
+	orgSvc := org.NewService(org.NewSQLStore(database), publisher, log.Logger, time.Now)
+
 	srv := rpc.NewServer(nc, log.Logger, "users")
 	srv.ContextHook = func(ctx context.Context, req rpc.Request) context.Context {
 		return applog.With(ctx, "request_id", req.RequestID)
 	}
-	if err := api.Register(srv, log.Logger, auth.NewHandler(resolver, email), profile.NewHandler(profileSvc)); err != nil {
+	if err := api.Register(srv, log.Logger, auth.NewHandler(resolver, email), profile.NewHandler(profileSvc), org.NewHandler(orgSvc)); err != nil {
 		log.Fatal("cannot register the handlers", "err", err)
 		return err
 	}

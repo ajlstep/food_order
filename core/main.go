@@ -1,35 +1,39 @@
-// Command core is the business-logic service of food-order: per user_id
-// (users.id from the bot's database) it keeps orders with a snapshot of the
-// dish, ratings, comments, labels and food preferences; it asks for the
-// shared menu, scores the dishes, orchestrates the recommendation
-// (catalog -> score -> llm -> bot) and computes the statistics.
+// Command core is the business-logic service of food-order: per user_id (from
+// the users service) it keeps orders with a snapshot of the dish and of where
+// the order goes, ratings, comments and labels; it asks for the shared menu,
+// scores the dishes, orchestrates the recommendation (catalog -> score -> llm
+// -> person) and computes the statistics.
 //
-// HTTP (:9081) for the bot; NATS JetStream for the menu, llm and events.
-// All settings live in internal/config (see .env.example).
+// It talks only over NATS: requests (internal/api), events (internal/events).
+//
+// main only starts things: it reads the settings, builds the pieces, joins
+// them and waits for the stop signal. All settings live in internal/config
+// (see .env.example).
 package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
-	"time"
 
 	"food-order/core/internal/api"
 	"food-order/core/internal/applog"
-	"food-order/core/internal/bus"
-	"food-order/core/internal/catalog"
 	"food-order/core/internal/config"
-	"food-order/core/internal/contracts"
 	"food-order/core/internal/events"
+	"food-order/core/internal/remote"
 	"food-order/core/internal/scheduler"
 	"food-order/core/internal/service"
 	"food-order/core/internal/store"
+	"food-order/shared/bus"
+	"food-order/shared/contracts/food"
+	sharedevents "food-order/shared/events"
+	"food-order/shared/rpc"
+	"food-order/shared/streams"
 )
 
 func main() {
@@ -43,7 +47,7 @@ func main() {
 		os.Exit(1)
 	}
 	al := applog.New(applog.Options{
-		Service: "core", URL: cfg.NATSURL, Token: cfg.NATSToken, User: cfg.NATSUser, Password: cfg.NATSPassword,
+		Service: "core", URL: cfg.NATSURL, User: cfg.NATSUser, Password: cfg.NATSPassword,
 		Additional: cfg.AdditionalLogs || *debug, Console: cfg.LogConsole,
 	})
 	slog.SetDefault(al.Logger)
@@ -56,8 +60,6 @@ func main() {
 }
 
 func run(log *slog.Logger, cfg config.Config) error {
-	var err error
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -67,72 +69,58 @@ func run(log *slog.Logger, cfg config.Config) error {
 	}
 	defer db.Close()
 
-	var pub bus.Publisher = bus.Off{}
-	var b *bus.Bus
-	if cfg.NATSURL != "" {
-		b, err = bus.Connect(bus.Config{
-			URL: cfg.NATSURL, Token: cfg.NATSToken, User: cfg.NATSUser, Password: cfg.NATSPassword,
-			Stream: cfg.NATSStream, Durable: cfg.NATSDurable, MaxAge: cfg.NATSMaxAge,
-		}, log)
-		if err != nil {
-			return err
-		}
-		defer b.Close()
-		pub = b
-	} else {
-		log.Warn("CORE_NATS_URL is empty: no broker; menu requests and llm are off, picks come from the score")
+	nc, err := bus.Connect(bus.Options{Name: "core", URL: cfg.NATSURL, User: cfg.NATSUser, Password: cfg.NATSPassword}, log)
+	if err != nil {
+		return err
+	}
+	defer nc.Close()
+
+	pub, err := sharedevents.NewPublisher(nc, log)
+	if err != nil {
+		return err
+	}
+	others := remote.New(rpc.NewClient(nc), cfg.RPCTimeout)
+	svc := service.New(db, others, others, pub, cfg, log)
+
+	srv := rpc.NewServer(nc, log, "core")
+	srv.ContextHook = func(ctx context.Context, req rpc.Request) context.Context {
+		return applog.With(ctx, "req_id", req.RequestID, "user_id", req.UserID)
+	}
+	if err := api.New(svc).Register(srv, log); err != nil {
+		return err
 	}
 
-	svc := service.New(db, catalog.New(cfg.CatalogURL, &http.Client{Timeout: cfg.HTTPTimeout}).WithLog(log), pub, cfg, log)
-	errc := make(chan error, 2)
+	// the database closes after these are done
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	defer stop() // runs before wg.Wait
 
-	if b != nil {
-		go func() {
-			if err := b.EnsureStream(ctx); err != nil {
-				return // ctx ended
-			}
-			// the scheduler starts once the stream exists, so its first
-			// menu request is not published into nothing
-			go scheduler.Run(ctx, svc, cfg.Tick)
-			h := events.New(svc)
-			err := b.Consume(ctx, contracts.ListenSubjects, h.Handle, func(subject string, err error) {
-				_ = pub.Publish(context.Background(), contracts.SubjectAlert, contracts.Alert{
+	failed := make(chan error, 1)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		scheduler.Run(ctx, svc, cfg.Tick)
+	}()
+	go func() {
+		defer wg.Done()
+		err := streams.Consume(ctx, nc, streams.Food, streams.ConsumerCore, events.New(svc).Handle, log,
+			streams.OnStuck(func(subject string, err error) {
+				_ = pub.Publish(context.Background(), food.SubjectAlert, food.Alert{
 					Service: "core", Level: "error", Text: "Un eveniment " + subject + " a eșuat de prea multe ori: " + err.Error(),
 				})
-			})
-			if err != nil && !errors.Is(err, context.Canceled) {
-				errc <- err
-			}
-		}()
-	}
-
-	if b == nil {
-		go scheduler.Run(ctx, svc, cfg.Tick)
-	}
-
-	srv := &http.Server{
-		Addr:              cfg.Addr,
-		Handler:           api.New(svc, db, log),
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      30 * time.Second,
-	}
-	go func() {
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errc <- err
+			}))
+		if err != nil {
+			failed <- err
 		}
 	}()
-	log.Info("core started", "addr", cfg.Addr, "db", cfg.DBPath, "catalog", cfg.CatalogURL, "nats", cfg.NATSURL,
-		"menu_request_time", cfg.MenuRequestTime.String(), "llm", cfg.LLMEnabled, "tz", cfg.Location.String(),
-		"additional_logs", cfg.AdditionalLogs, "log_console", cfg.LogConsole, "tick", cfg.Tick)
+	log.Info("core started", "db", cfg.DBPath, "menu_request_time", cfg.MenuRequestTime.String(), "llm", cfg.LLMEnabled,
+		"tz", cfg.Location.String(), "additional_logs", cfg.AdditionalLogs, "tick", cfg.Tick)
 
 	select {
-	case err = <-errc:
-		stop()
+	case err = <-failed:
 	case <-ctx.Done():
 	}
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = srv.Shutdown(shutdownCtx)
+	stop()
+	_ = nc.Drain() // answer the requests already received
 	return err
 }

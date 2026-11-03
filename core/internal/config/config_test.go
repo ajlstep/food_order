@@ -34,6 +34,7 @@ func TestEnvExampleIsTheDefaults(t *testing.T) {
 		t.Errorf("location %v != %v", got.Location, want.Location)
 	}
 	got.Location, want.Location = nil, nil
+	got.NATSPassword = "" // the only value without a default: dev password of the example
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf(".env.example differs from the defaults:\n%+v\n%+v", got, want)
 	}
@@ -51,7 +52,6 @@ func TestValues(t *testing.T) {
 		EnvMenuDays:        "1,3,5",
 		EnvScoreWeights:    "rating=2, repeat=0",
 		EnvLLMEnabled:      "false",
-		EnvNATSURL:         "",
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -65,8 +65,8 @@ func TestValues(t *testing.T) {
 	if cfg.Score.Weights.Rating != 2 || cfg.Score.Weights.Repeat != 0 || cfg.Score.Weights.Similarity != DefaultWeights.Similarity {
 		t.Errorf("weights: %+v", cfg.Score.Weights)
 	}
-	if cfg.LLMEnabled || cfg.NATSURL != "" { // set to "" = no broker
-		t.Errorf("llm %v nats %q", cfg.LLMEnabled, cfg.NATSURL)
+	if cfg.LLMEnabled {
+		t.Errorf("llm %v", cfg.LLMEnabled)
 	}
 }
 

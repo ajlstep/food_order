@@ -39,7 +39,6 @@ func TestValues(t *testing.T) {
 		EnvRawDir:      "/tmp/raw",
 		EnvNATSEnabled: "false",
 		EnvNATSURL:     "nats://localhost:4222",
-		EnvNATSToken:   "secret",
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -48,8 +47,7 @@ func TestValues(t *testing.T) {
 		Source: "bistro", SiteURL: "https://bistro.md/ru/katalog?date={date}", UserAgent: "my-agent",
 		HTTPTimeout: 5 * time.Second, Addr: "127.0.0.1:9000", Location: time.UTC,
 		CacheTTL: 90 * time.Minute, MinInterval: time.Minute, RawDir: "/tmp/raw",
-		NATSEnabled: false, NATSURL: "nats://localhost:4222", NATSToken: "secret",
-		NATSStream: DefaultNATSStream, NATSDurable: DefaultNATSDurable,
+		NATSEnabled: false, NATSURL: "nats://localhost:4222", NATSUser: "parser",
 	}
 	if !reflect.DeepEqual(cfg, want) {
 		t.Errorf("got %+v\nwant %+v", cfg, want)
@@ -63,13 +61,11 @@ func TestAllProblemsReportedTogether(t *testing.T) {
 		EnvTZ:          "Mars/Base",
 		EnvSiteURL:     "bistro.md/catalog",
 		EnvNATSEnabled: "maybe",
-		EnvNATSToken:   "t",
-		EnvNATSUser:    "u",
 	}))
 	if err == nil {
 		t.Fatal("expected an error")
 	}
-	for _, key := range []string{EnvHTTPTimeout, EnvCacheTTL, EnvTZ, EnvSiteURL, EnvNATSEnabled, EnvNATSToken} {
+	for _, key := range []string{EnvHTTPTimeout, EnvCacheTTL, EnvTZ, EnvSiteURL, EnvNATSEnabled} {
 		if !strings.Contains(err.Error(), key) {
 			t.Errorf("error does not mention %s: %v", key, err)
 		}
@@ -157,6 +153,7 @@ func TestEnvExampleMatchesDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cfg.NATSPassword = "" // the only value without a default: dev password of the example
 	if !reflect.DeepEqual(cfg, want) {
 		t.Errorf(".env.example differs from the defaults:\n got %+v\nwant %+v", cfg, want)
 	}

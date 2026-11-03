@@ -9,7 +9,9 @@ import (
 
 	"github.com/go-telegram/bot/models"
 
-	"food-order/bot/internal/contracts"
+	contracts "food-order/shared/contracts/core"
+	"food-order/shared/contracts/food"
+	"food-order/shared/contracts/users"
 )
 
 // All the texts the user sees are in this file (Romanian for now; Russian later).
@@ -22,10 +24,13 @@ const helpText = `Sunt botul tău de prânz 🍽
 /istoric — ce am ales (/istoric 60 = ultimele 60 de zile)
 /preferinte — alergeni, ce nu mănânc, ce-mi place
 /stat — statistica lunii (/stat 7 = ultimele 7 zile)
-/setari — ora și zilele de comandă
-/profil — numele, nickname-ul, telefonul
-/grup — grupul (compania): creare, invitații, statistică
-/stop — opresc recomandările automate`
+/setari — ora, zilele de comandă, notificările
+/profil — numele, emailul, telefonul
+/companie — compania: membri, invitații, raport
+/grup — grupul: adresa comună
+/invitatii — invitațiile mele
+/parteneri — bucătăriile și până când se poate comanda
+/stop — opresc notificările`
 
 const prefsHelp = `Exemple:
 <code>/preferinte add alergen lapte</code>
@@ -82,7 +87,7 @@ func rangeText(r *contracts.Range, unit string) string {
 func esc(s string) string { return html.EscapeString(s) }
 
 // recommendationText is the message with the picks (HTML).
-func recommendationText(date string, picks []contracts.Pick) string {
+func recommendationText(date string, picks []contracts.Pick, loc *time.Location) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "🍽 <b>Recomandări pentru %s</b>\n", esc(humanDate(date)))
 	for i, p := range picks {
@@ -104,8 +109,40 @@ func recommendationText(date string, picks []contracts.Pick) string {
 			fmt.Fprintf(&b, "\n   ⚠️ posibil: %s", esc(strings.Join(p.AllergensPossible, ", ")))
 		}
 	}
+	if until := orderUntil(picks, loc); until != "" {
+		fmt.Fprintf(&b, "\n\n⏰ Poți comanda până la <b>%s</b>.", esc(until))
+	}
 	b.WriteString("\n\nAlege un fel:")
 	return b.String()
+}
+
+// orderUntil is the earliest limit among the picks, as "10:00" or, when it
+// is not on the same day as the rest of the week, with the day in front.
+func orderUntil(picks []contracts.Pick, loc *time.Location) string {
+	var first int64
+	for _, p := range picks {
+		if p.OrderUntilMs > 0 && (first == 0 || p.OrderUntilMs < first) {
+			first = p.OrderUntilMs
+		}
+	}
+	if first == 0 {
+		return ""
+	}
+	return humanMoment(first, loc)
+}
+
+// humanMoment: "joi, 29 oct, 10:00".
+func humanMoment(ms int64, loc *time.Location) string {
+	t := time.UnixMilli(ms).In(loc)
+	return humanDate(t.Format(dateLayout)) + ", " + t.Format("15:04")
+}
+
+// destinationText says where a saved order goes.
+func destinationText(o contracts.Order) string {
+	if o.GroupName == "" {
+		return ""
+	}
+	return fmt.Sprintf("\n📍 %s, %s", esc(o.GroupName), esc(o.Address))
 }
 
 // recommendationKeyboard: one button per dish, the "necessity" switch,
@@ -194,34 +231,41 @@ func historyText(orders []contracts.Order, limit int) string {
 	return b.String()
 }
 
-var kindNames = map[string]string{
-	"allergen": "Alergeni",
-	"dislike":  "Nu mănânc",
-	"like":     "Îmi place",
-	"diet":     "Dietă",
+var prefSections = []struct{ kind, title string }{
+	{users.PrefDislike, "Nu mănânc"},
+	{users.PrefLike, "Îmi place"},
+	{users.PrefDiet, "Dietă"},
+	{users.PrefTarget, "Ținte"},
 }
 
-func prefsText(p contracts.Prefs) string {
-	if len(p.Items) == 0 {
+// prefsText numbers the lines as deleteFood reads them.
+func prefsText(f foodProfile) string {
+	if len(f.Allergens) == 0 && len(f.Prefs) == 0 {
 		return "Nu ai preferințe salvate.\n\n" + prefsHelp
 	}
 	var b strings.Builder
 	b.WriteString("<b>Preferințele mele</b>\n")
-	for _, kind := range []string{"allergen", "dislike", "like", "diet"} {
+	if len(f.Allergens) > 0 {
+		b.WriteString("\n<b>Alergeni</b>\n")
+		for i, a := range f.Allergens {
+			fmt.Fprintf(&b, "%d. %s\n", i+1, esc(a))
+		}
+	}
+	for _, section := range prefSections {
 		first := true
-		for i, it := range p.Items {
-			if it.Kind != kind {
+		for i, it := range f.Prefs {
+			if it.Kind != section.kind {
 				continue
 			}
 			if first {
-				fmt.Fprintf(&b, "\n<b>%s</b>\n", kindNames[kind])
+				fmt.Fprintf(&b, "\n<b>%s</b>\n", section.title)
 				first = false
 			}
 			hard := ""
-			if it.Hard && kind != "allergen" {
+			if it.Hard {
 				hard = " (niciodată)"
 			}
-			fmt.Fprintf(&b, "%d. %s%s\n", i+1, esc(it.Value), hard)
+			fmt.Fprintf(&b, "%d. %s%s\n", len(f.Allergens)+i+1, esc(it.Value), hard)
 		}
 	}
 	b.WriteString("\n" + prefsHelp)
@@ -260,7 +304,7 @@ func statsText(s contracts.Stats) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-func alertText(a contracts.Alert) string {
+func alertText(a food.Alert) string {
 	icon := "ℹ️"
 	switch a.Level {
 	case "warn", "warning":

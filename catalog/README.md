@@ -4,26 +4,29 @@ Serviciul pentru **tot ce ține de mâncare**: feluri, meniul fiecărei zile, gr
 
 `catalog` **nu calculează** nutriția: o primește de la sursă (bucătărie) sau de la `llm` și o salvează, cu sursa (`kitchen` / `llm` / `missing`).
 
-Notițe: Obsidian `projects/food-order/Catalog`, `Comunicare`, `Arhitectura`, `Modele`.
+Notițe: Obsidian `projects/food-order/Catalog`, `Comunicare`, `Arhitectura`, `Modele`, `etape/E7-E8-Core-Catalog`, `etape/E10-Parteneri`.
 
 ## Pornire
 
 ```bash
-go mod tidy              # prima dată (go.sum e copiat din core, tidy îl completează dacă lipsește ceva)
 go test ./...
-cp .env.example .env     # opțional: toate valorile au implicit
+cp .env.example .env     # sau ../init-env.sh
 go run .                 # sau: go run . -env alt.env
 ```
 
-Baza `data/catalog.db` se creează singură; migrările rulează la pornire (`schema_version`). Driver SQLite: `github.com/ncruces/go-sqlite3` (Go pur, fără CGO), ca în `core` și `bot`.
+Vorbește doar prin NATS, nu are port. Nu pornește fără NATS. Serviciul `llm` nu există încă, deci implicit `CATALOG_ANALYSIS_ENABLED=false` și `CATALOG_EMBED_ENABLED=false`: meniul e gata imediat, cu ce a dat sursa.
 
-**Stream-ul `FOOD`** îl creează `core`; `catalog` îl așteaptă (în log: „stream not found yet”) și pornește singur când apare. Consumatorul durabil se numește `catalog` și ia **toate** mesajele din stream, deci un meniu trimis cât `catalog` era oprit nu se pierde.
+Baza `data/catalog.db` se creează singură; migrările rulează la pornire (`schema_version`). Stream-urile și consumatorul `catalog` le creează `nats-setup`. Consumatorul ia **toate** mesajele din stream, ca să nu piardă nimic.
 
-Fără NATS: `CATALOG_NATS_URL=` (gol) → doar HTTP; `llm` nu e întrebat, meniul se încarcă doar prin `POST /v1/import`.
+## Parteneri
+
+Bucătăriile stau în `partners.json`, scris de mână și citit la fiecare pornire (`CATALOG_PARTNERS_FILE`). Pentru fiecare: `key`, `name`, `source` (legătura cu meniul: felurile cu `source` așa sunt ale lui), programul (`days` ISO, `days_before`, `order_until`, `delivery_from`, `delivery_to`) și zilele închise. **Orele din fișier sunt de completat cu cele reale.**
+
+`catalog` adaugă la fiecare fel `partner_id`, `partner_name`, `order_until_ms` și `closed`. Regula se aplică în `core`: ce e închis nu se recomandă și nu se comandă.
 
 ## Ce se întâmplă cu un meniu
 
-1. Vine `food.menu.fetched` `{request_id, source, days[{date, items[]}]}` (sau `POST /v1/import` cu același corp).
+1. Vine `food.menu.fetched` `{request_id, source, days[{date, items[]}]}` (sau `rpc.catalog.menu.import` cu același corp).
 2. Fiecare fel e găsit sau creat în `dishes`: după `external_id` dacă sursa îl dă, altfel după `name_norm` (litere mici, spații unice, ş→ș, ţ→ț, ghilimele unificate).
 3. Se salvează `menu_items` cu ce a dat sursa: preț, categorie, gramaj, componente, nutriție, alergeni. Componentele pot veni ca text (`"Supă de linte"`, cum le dă parserul) sau ca obiect `{name, grams, method}`.
 4. Pentru **ce lipsește** pleacă `food.dish.analyze.requested` cu `need` ⊆ `components`, `nutrition`, `allergens`, `portion`, `tags`. Ce a dat sursa nu se mai cere; ce e deja `known` se trimite ca context.
@@ -34,21 +37,20 @@ Fără NATS: `CATALOG_NATS_URL=` (gol) → doar HTTP; `llm` nu e întrebat, meni
 
 Tot ce trebuie trimis (cereri la `llm`, `food.menu.ready`) se trimite după fiecare eveniment și la fiecare `CATALOG_TICK`, deci dacă brokerul a căzut, se retrimite când revine.
 
-## API (HTTP :9082, intern)
+## Cereri (NATS, `rpc.catalog.*`)
 
-Erori: `{"error": {"code", "message"}}`, `message` în română.
+Erorile sunt refuzuri cu cod stabil; textul pentru om e în `details.text`.
 
-| Cerere | Răspuns |
+| Subiect | Răspuns |
 |---|---|
-| `GET /healthz` | `{"status":"ok"}` (verifică și baza) |
-| `GET /v1/menu?date=` | `{date, items:[Dish]}` în ordinea de pe site; fără `date` = mâine (`CATALOG_TZ`); zi fără meniu = `items: []` |
-| `GET /v1/dishes?ids=12,15,18&date=` | `{items:[Dish]}` cu valorile din meniul zilei `date`; fără `date` = ultima zi în care a fost felul în meniu. Id-urile necunoscute (sau care nu sunt în meniul zilei) lipsesc din listă |
-| `GET /v1/dishes/{id}?date=` | `Dish`; `404 not_found` |
-| `POST /v1/similar` `{liked_ids, candidate_ids}` | `{scores:[{id, score 0..1, like_id}]}` — cea mai mare similitudine cosinus cu felurile plăcute (același model); un fel nu se compară cu el însuși; candidații fără embedding lipsesc |
-| `POST /v1/dishes/{id}/allergens/confirm` `{allergens[]}` + `X-User-ID` | `Dish`; listă goală = „confirmat: fără alergeni”; fără antet → `400 missing_user` |
-| `POST /v1/import` | același corp ca `data` din `food.menu.fetched` → `{request_id, days:[{date, revision, items, skipped, changed}]}`. Doar pentru depanare (`CATALOG_IMPORT_ENABLED`) |
+| `menu.get` `{date}` | `{date, items:[Dish]}` în ordinea de pe site; fără `date` = mâine (`CATALOG_TZ`); zi fără meniu = `items: []` |
+| `dishes.get` `{ids, date}` | `{items:[Dish]}` cu valorile din meniul zilei `date`; fără `date` = ultima zi în care a fost felul în meniu |
+| `similar` `{liked_ids, candidate_ids}` | `{scores:[{id, score 0..1, like_id}]}`: cea mai mare similitudine cosinus cu felurile plăcute (același model) |
+| `allergens.confirm` `{dish_id, allergens[]}`, cu persoana în plic | `Dish`; listă goală = „confirmat: fără alergeni” |
+| `partners.list` `{date}` | Partenerii și cum stau în ziua aceea |
+| `menu.import` | același corp ca `data` din `food.menu.fetched`. Doar pentru depanare, cu `rpccall` ca admin |
 
-`Dish` (citit de `core` ca `CatalogDish`):
+`Dish`:
 
 ```json
 {"id": 2, "menu_item_id": 2, "date": "2026-11-02", "name": "LUNCH 1 Maxi", "category": "Lunch Box", "price": 75,
@@ -63,7 +65,7 @@ Erori: `{"error": {"code", "message"}}`, `message` în română.
 
 `nutrition` lipsește când `nutrition_source = missing`. `allergens.confirmed` lipsește = nimeni n-a confirmat; `[]` = confirmat „fără”. `analysis`: `none` (nu lipsea nimic), `pending` (cererea n-a plecat încă), `requested`, `done`, `timeout`, `off` (analiza oprită).
 
-Forma e exact cea presupusă în `core/internal/contracts` (`CatalogDish`, `{"items": [...]}`, `{"scores": [...]}`), deci `core` nu are nevoie de schimbări. Am verificat cap-coadă: `core` → `food.menu.requested` → parser simulat → `catalog` → llm simulat → `food.menu.ready` → recomandare și comandă cu snapshot în `core`.
+Tipurile sunt în `shared/contracts/catalog`.
 
 ## Evenimente (NATS JetStream)
 
@@ -106,19 +108,16 @@ Coloane în plus față de schema din notiță (marcate `+` în migrare): `dishe
 ## Structură
 
 ```
-main.go                 # pornire: config, baza, NATS (consumator), tick, HTTP
+main.go                 # pornire: config, baza, partenerii, NATS, tick
+partners.json           # bucătăriile și programul lor, scrise de mână
 internal/config/        # Config, Load, .env, validare (un test verifică .env.example = implicitele)
-internal/contracts/     # tipuri HTTP + evenimente (Range tolerant, Component din text sau obiect)
 internal/food/          # NormName, NormList, ParseWeight, ParseNutrition, hash-uri
-internal/store/         # catalog.db: import pe zile + revizii, stare analiză, cereri, embeddings, citiri
-internal/service/       # logica: Import, OnAnalyzed, OnEmbedded, Flush/Tick, Menu, Dishes, Similar, ConfirmAllergens
+internal/store/         # catalog.db: import pe zile + revizii, stare analiză, parteneri, embeddings
+internal/service/       # logica: Import, OnAnalyzed, OnEmbedded, Flush/Tick, Menu, Dishes, Similar, parteneri
 internal/events/        # evenimente NATS -> service (idempotent)
-internal/bus/           # NATS JetStream: publish, consumator durabil (așteaptă stream-ul), ULID
-internal/api/           # HTTP + teste
+internal/api/           # rpc.catalog.* + teste
 ```
 
 ## De făcut în celelalte servicii
 
-- **parser**: legat la NATS (ascultă `food.menu.requested`, publică `food.menu.fetched` / `food.menu.error`). `POST /v1/import` rămâne pentru depanare.
-- **llm**: să asculte `food.dish.analyze.requested` / `food.dish.embed.requested` și să răspundă cu `food.dish.analyzed` (doar câmpurile din `need`, `menu_item_id` repetat) și `food.dish.embedded`.
-- **parser**: e pe `:9083` (implicit și în `.env`), deci nu se mai ciocnește cu `catalog`.
+- **llm**: nu există. Să asculte `food.dish.analyze.requested` / `food.dish.embed.requested` și să răspundă cu `food.dish.analyzed` (doar câmpurile din `need`, `menu_item_id` repetat) și `food.dish.embedded`. Are nevoie de un utilizator în `nuts/nats.conf`.

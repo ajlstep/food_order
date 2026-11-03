@@ -86,9 +86,7 @@ Alt site = alt pachet în `internal/<site>` care implementează `menu.Fetcher`, 
 main.go                      # pornire; alege modulul de site (newFetcher)
 internal/config/             # Config, Load, citirea .env, validare
 internal/menu/               # Item, Fetcher, Service (cache + pauză între cereri), erori tipizate, NormName, ParsePrice, RawStore
-internal/contracts/          # evenimentele NATS ale contractului de sursă de meniu
 internal/events/             # food.menu.requested -> food.menu.fetched / food.menu.error
-internal/bus/                # NATS JetStream: publish, consumator durabil (așteaptă stream-ul), ULID
 internal/api/                # /healthz, /v1/fetch
 internal/bistro/             # bistro.md: HTTP + goquery, parser scris special pentru site
 internal/htmlsrc/            # parser generic cu selectori din JSON; nefolosit acum

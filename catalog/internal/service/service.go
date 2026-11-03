@@ -1,7 +1,6 @@
 // Package service is the logic of catalog: it saves the menus the source
 // sends, asks llm only for what is missing, saves llm's answers, tells core
-// when a requested menu is ready, and answers the HTTP questions about
-// dishes. catalog never computes nutrition: it gets it from the source or
+// when a requested menu is ready, and answers the questions about dishes. catalog never computes nutrition: it gets it from the source or
 // from llm and keeps who gave what.
 package service
 
@@ -12,38 +11,34 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"net/http"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"food-order/catalog/internal/applog"
-	"food-order/catalog/internal/bus"
 	"food-order/catalog/internal/config"
-	"food-order/catalog/internal/contracts"
 	"food-order/catalog/internal/food"
 	"food-order/catalog/internal/store"
+	contracts "food-order/shared/contracts/catalog"
+	topics "food-order/shared/contracts/food"
+	"food-order/shared/events"
 )
 
-// Error is an error with an HTTP status and a code; Message is in Romanian.
+// Error is a refusal: a stable code and the words for the person, in Romanian.
 type Error struct {
-	Status  int
 	Code    string
 	Message string
 }
 
 func (e *Error) Error() string { return e.Code + ": " + e.Message }
 
-func badRequest(code, msg string) *Error {
-	return &Error{Status: http.StatusBadRequest, Code: code, Message: msg}
-}
+func badRequest(code, msg string) *Error { return &Error{Code: code, Message: msg} }
 
 // Service holds everything the logic needs.
 type Service struct {
 	Store *store.Store
-	Bus   bus.Publisher
+	Bus   events.Publisher
 	Cfg   config.Config
 	Log   *slog.Logger
 	Now   func() time.Time
@@ -53,11 +48,11 @@ type Service struct {
 }
 
 // New makes a Service.
-func New(st *store.Store, pub bus.Publisher, cfg config.Config, log *slog.Logger) *Service {
+func New(st *store.Store, pub events.Publisher, cfg config.Config, log *slog.Logger) *Service {
 	return &Service{Store: st, Bus: pub, Cfg: cfg, Log: log, Now: time.Now}
 }
 
-// Limits of the HTTP API.
+// Limits of the requests.
 const (
 	maxIDs        = 500
 	embedBatch    = 50
@@ -66,7 +61,7 @@ const (
 
 // ---------------------------------------------------------------- menu in
 
-// Import saves a menu from the source (food.menu.fetched, or POST /v1/import),
+// Import saves a menu from the source (food.menu.fetched, or by hand),
 // remembers the request of core and sends what is missing to llm.
 func (s *Service) Import(ctx context.Context, m contracts.MenuFetched) (contracts.ImportResponse, error) {
 	now := s.Now()
@@ -76,7 +71,7 @@ func (s *Service) Import(ctx context.Context, m contracts.MenuFetched) (contract
 	}
 	reqID := strings.TrimSpace(m.RequestID)
 	if reqID == "" { // a menu nobody asked for (e.g. the api later): core still hears it is ready
-		reqID = "catalog-" + bus.NewID(now)
+		reqID = "catalog-" + events.NewID(now)
 	}
 
 	ctx = applog.With(ctx, "request_id", reqID, "source", source)
@@ -242,11 +237,11 @@ func (s *Service) OnAnalyzed(ctx context.Context, a contracts.DishAnalyzed) erro
 // OnEmbedded saves the embedding of a dish (food.dish.embedded).
 func (s *Service) OnEmbedded(ctx context.Context, e contracts.DishEmbedded) error {
 	if len(e.Vector) == 0 {
-		return &Error{Status: http.StatusUnprocessableEntity, Code: "bad_vector", Message: "vectorul e gol"}
+		return &Error{Code: "bad_vector", Message: "vectorul e gol"}
 	}
 	for _, f := range e.Vector {
 		if math.IsNaN(f) || math.IsInf(f, 0) {
-			return &Error{Status: http.StatusUnprocessableEntity, Code: "bad_vector", Message: "vectorul are valori nevalide"}
+			return &Error{Code: "bad_vector", Message: "vectorul are valori nevalide"}
 		}
 	}
 	err := s.Store.SaveEmbedding(ctx, e.DishID, e.Model, e.Vector, s.Now())
@@ -305,8 +300,8 @@ func (s *Service) Flush(ctx context.Context) error {
 		s.Log.DebugContext(ctx, "analyses to request", "count", len(jobs))
 	}
 	for _, j := range jobs {
-		if err := s.Bus.Publish(ctx, contracts.SubjectDishAnalyzeRequested, j.Request); err != nil {
-			errs = append(errs, s.publishErr(err))
+		if err := s.Bus.Publish(ctx, topics.SubjectDishAnalyzeRequested, j.Request); err != nil {
+			errs = append(errs, err)
 			break // the broker is down: the rest waits for the next tick
 		}
 		if err := s.Store.MarkRequested(ctx, j.Items, now); err != nil {
@@ -322,8 +317,8 @@ func (s *Service) Flush(ctx context.Context) error {
 			errs = append(errs, err)
 		}
 		for _, e := range embeds {
-			if err := s.Bus.Publish(ctx, contracts.SubjectDishEmbedRequested, e); err != nil {
-				errs = append(errs, s.publishErr(err))
+			if err := s.Bus.Publish(ctx, topics.SubjectDishEmbedRequested, e); err != nil {
+				errs = append(errs, err)
 				break
 			}
 			if err := s.Store.MarkEmbedRequested(ctx, e.DishID, now); err != nil {
@@ -341,8 +336,8 @@ func (s *Service) Flush(ctx context.Context) error {
 		errs = append(errs, err)
 	}
 	for _, r := range ready {
-		if err := s.Bus.Publish(ctx, contracts.SubjectMenuReady, r); err != nil {
-			errs = append(errs, s.publishErr(err))
+		if err := s.Bus.Publish(ctx, topics.SubjectMenuReady, r); err != nil {
+			errs = append(errs, err)
 			break
 		}
 		if err := s.Store.MarkPublished(ctx, r.RequestID, now); err != nil {
@@ -353,29 +348,20 @@ func (s *Service) Flush(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// publishErr hides ErrOff (running without a broker is not an error).
-func (s *Service) publishErr(err error) error {
-	if errors.Is(err, bus.ErrOff) {
-		return nil
-	}
-	return err
-}
-
 func (s *Service) alert(ctx context.Context, level, text string) {
 	if level == "error" {
 		s.Log.ErrorContext(ctx, "alert to the admins", "alert_level", level, "text", text)
 	} else {
 		s.Log.WarnContext(ctx, "alert to the admins", "alert_level", level, "text", text)
 	}
-	if err := s.Bus.Publish(ctx, contracts.SubjectAlert, contracts.Alert{Service: "catalog", Level: level, Text: text}); err != nil &&
-		!errors.Is(err, bus.ErrOff) {
+	if err := s.Bus.Publish(ctx, topics.SubjectAlert, topics.Alert{Service: "catalog", Level: level, Text: text}); err != nil {
 		s.Log.WarnContext(ctx, "alert not sent", "err", err, "text", text)
 	}
 }
 
 // Tick runs Flush and, once an hour, forgets old processed event ids.
 func (s *Service) Tick(ctx context.Context) {
-	ctx = applog.With(ctx, "job", "tick", "tick_id", bus.NewID(s.Now()))
+	ctx = applog.With(ctx, "job", "tick", "tick_id", events.NewID(s.Now()))
 	if err := s.Flush(ctx); err != nil {
 		s.Log.WarnContext(ctx, "tick", "err", err)
 	}
@@ -390,7 +376,7 @@ func (s *Service) Tick(ctx context.Context) {
 	}
 }
 
-// ------------------------------------------------------------- HTTP reads
+// ------------------------------------------------------------------ reads
 
 // Menu returns the dishes of a day; without a date, tomorrow.
 func (s *Service) Menu(ctx context.Context, date string) (contracts.MenuResponse, error) {
@@ -404,15 +390,17 @@ func (s *Service) Menu(ctx context.Context, date string) (contracts.MenuResponse
 	if err != nil {
 		return contracts.MenuResponse{}, err
 	}
+	if err := s.withPartners(ctx, items); err != nil {
+		return contracts.MenuResponse{}, err
+	}
 	s.Log.DebugContext(ctx, "menu read", "date", date, "items", len(items))
 	return contracts.MenuResponse{Date: date, Items: items}, nil
 }
 
-// Dishes returns dishes by id ("12,15,18"), with the values of the menu of
-// date (or of the latest day they were on the menu).
-func (s *Service) Dishes(ctx context.Context, ids, date string) (contracts.DishesResponse, error) {
-	list, err := parseIDs(ids)
-	if err != nil {
+// Dishes returns dishes by id, with the values of the menu of date (or of
+// the latest day they were on the menu).
+func (s *Service) Dishes(ctx context.Context, list []int64, date string) (contracts.DishesResponse, error) {
+	if err := checkIDs(list); err != nil {
 		return contracts.DishesResponse{}, err
 	}
 	if date != "" {
@@ -424,11 +412,14 @@ func (s *Service) Dishes(ctx context.Context, ids, date string) (contracts.Dishe
 	if err != nil {
 		return contracts.DishesResponse{}, err
 	}
+	if err := s.withPartners(ctx, items); err != nil {
+		return contracts.DishesResponse{}, err
+	}
 	s.Log.DebugContext(ctx, "dishes read", "ids", list, "date", date, "found", len(items))
 	return contracts.DishesResponse{Items: items}, nil
 }
 
-// Dish returns one dish; 404 when it is unknown or not on that day's menu.
+// Dish returns one dish; a refusal when it is unknown or not on that day's menu.
 func (s *Service) Dish(ctx context.Context, id int64, date string) (contracts.Dish, error) {
 	if date != "" {
 		if err := checkDate(date); err != nil {
@@ -445,7 +436,7 @@ func (s *Service) Dish(ctx context.Context, id int64, date string) (contracts.Di
 		if date != "" {
 			msg = "Felul nu e în meniul din " + date + "."
 		}
-		return contracts.Dish{}, &Error{Status: http.StatusNotFound, Code: "not_found", Message: msg}
+		return contracts.Dish{}, &Error{Code: "not_found", Message: msg}
 	}
 	return items[0], nil
 }
@@ -511,14 +502,14 @@ func cosine(a, b []float32) float64 {
 
 // ConfirmAllergens saves a user's confirmation of the allergens of a dish
 // and returns the dish as it is now.
-func (s *Service) ConfirmAllergens(ctx context.Context, userID, dishID int64, allergens []string) (contracts.Dish, error) {
+func (s *Service) ConfirmAllergens(ctx context.Context, userID string, dishID int64, allergens []string) (contracts.Dish, error) {
 	if allergens == nil {
 		return contracts.Dish{}, badRequest("bad_allergens", "Lipsește lista allergens (o listă goală = fără alergeni).")
 	}
 	err := s.Store.ConfirmAllergens(ctx, dishID, food.NormList(allergens), userID, s.Now())
 	if errors.Is(err, store.ErrNotFound) {
 		s.Log.InfoContext(ctx, "allergens for an unknown dish", "dish_id", dishID, "user_id", userID)
-		return contracts.Dish{}, &Error{Status: http.StatusNotFound, Code: "not_found", Message: "Nu există felul acesta."}
+		return contracts.Dish{}, &Error{Code: "not_found", Message: "Nu există felul acesta."}
 	}
 	if err != nil {
 		return contracts.Dish{}, err
@@ -534,28 +525,12 @@ func checkDate(date string) error {
 	return nil
 }
 
-func parseIDs(s string) ([]int64, error) {
-	var out []int64
-	seen := map[int64]bool{}
-	for _, p := range strings.Split(s, ",") {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			continue
-		}
-		id, err := strconv.ParseInt(p, 10, 64)
-		if err != nil || id <= 0 {
-			return nil, badRequest("bad_ids", "ids trebuie să fie numere separate prin virgulă (de ex. 12,15,18).")
-		}
-		if !seen[id] {
-			seen[id] = true
-			out = append(out, id)
-		}
+func checkIDs(ids []int64) error {
+	if len(ids) == 0 {
+		return badRequest("bad_ids", "Lipsesc id-urile felurilor.")
 	}
-	if len(out) == 0 {
-		return nil, badRequest("bad_ids", "Lipsește ids (de ex. ?ids=12,15,18).")
+	if len(ids) > maxIDs {
+		return badRequest("too_many_ids", fmt.Sprintf("Cel mult %d id-uri.", maxIDs))
 	}
-	if len(out) > maxIDs {
-		return nil, badRequest("too_many_ids", fmt.Sprintf("Cel mult %d id-uri.", maxIDs))
-	}
-	return out, nil
+	return nil
 }

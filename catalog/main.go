@@ -1,22 +1,24 @@
 // Command catalog is the food service of food-order: dishes, the menu of
 // each day, weight, components, nutrition per portion (min/max, with its
-// source), allergens and embeddings. It knows nothing about users.
+// source), allergens, embeddings and the partners who cook. It knows nothing
+// about users.
 //
 // It saves the menu the source sends (food.menu.fetched), asks llm only for
 // what is missing (food.dish.analyze.requested, food.dish.embed.requested),
 // and tells core when the requested menu is complete (food.menu.ready).
-// HTTP (:9082) for core and bot. All settings live in internal/config
+//
+// It talks only over NATS: requests (internal/api), events (internal/events).
+//
+// main only starts things: it reads the settings, builds the pieces, joins
+// them and waits for the stop signal. All settings live in internal/config
 // (see .env.example).
 package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
-	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"sync"
@@ -25,12 +27,15 @@ import (
 
 	"food-order/catalog/internal/api"
 	"food-order/catalog/internal/applog"
-	"food-order/catalog/internal/bus"
 	"food-order/catalog/internal/config"
-	"food-order/catalog/internal/contracts"
 	"food-order/catalog/internal/events"
 	"food-order/catalog/internal/service"
 	"food-order/catalog/internal/store"
+	"food-order/shared/bus"
+	"food-order/shared/contracts/food"
+	sharedevents "food-order/shared/events"
+	"food-order/shared/rpc"
+	"food-order/shared/streams"
 )
 
 func main() {
@@ -44,7 +49,7 @@ func main() {
 		os.Exit(1)
 	}
 	al := applog.New(applog.Options{
-		Service: "catalog", URL: cfg.NATSURL, Token: cfg.NATSToken, User: cfg.NATSUser, Password: cfg.NATSPassword,
+		Service: "catalog", URL: cfg.NATSURL, User: cfg.NATSUser, Password: cfg.NATSPassword,
 		Additional: cfg.AdditionalLogs || *debug, Console: cfg.LogConsole,
 	})
 	slog.SetDefault(al.Logger)
@@ -57,14 +62,6 @@ func main() {
 }
 
 func run(log *slog.Logger, cfg config.Config) error {
-
-	// the port first: if it is taken, stop before touching the database or the broker
-	ln, err := net.Listen("tcp", cfg.Addr)
-	if err != nil {
-		return fmt.Errorf("%s=%s is already in use (another catalog, or the parser on the same port?): %w", config.EnvAddr, cfg.Addr, err)
-	}
-	defer ln.Close()
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -74,84 +71,61 @@ func run(log *slog.Logger, cfg config.Config) error {
 	}
 	defer db.Close()
 
-	var pub bus.Publisher = bus.Off{}
-	var b *bus.Bus
-	if cfg.NATSURL != "" {
-		b, err = bus.Connect(bus.Config{
-			URL: cfg.NATSURL, Token: cfg.NATSToken, User: cfg.NATSUser, Password: cfg.NATSPassword,
-			Stream: cfg.NATSStream, Durable: cfg.NATSDurable,
-		}, log)
-		if err != nil {
-			return err
-		}
-		defer b.Close()
-		pub = b
-	} else {
-		// nobody could answer: llm is reached only through the broker
-		log.Warn("CATALOG_NATS_URL is empty: no broker; llm is never asked, menus come only through POST /v1/import")
-		cfg.AnalysisEnabled, cfg.EmbedEnabled = false, false
+	nc, err := bus.Connect(bus.Options{Name: "catalog", URL: cfg.NATSURL, User: cfg.NATSUser, Password: cfg.NATSPassword}, log)
+	if err != nil {
+		return err
+	}
+	defer nc.Close()
+
+	pub, err := sharedevents.NewPublisher(nc, log)
+	if err != nil {
+		return err
+	}
+	svc := service.New(db, pub, cfg, log)
+	if err := svc.LoadPartners(ctx, cfg.PartnersFile); err != nil {
+		return err
 	}
 
-	svc := service.New(db, pub, cfg, log)
-	errc := make(chan error, 2)
+	srv := rpc.NewServer(nc, log, "catalog")
+	srv.ContextHook = func(ctx context.Context, req rpc.Request) context.Context {
+		return applog.With(ctx, "req_id", req.RequestID)
+	}
+	if err := api.New(svc).Register(srv, log); err != nil {
+		return err
+	}
 
-	// every goroutine that uses the database is in wg: it is waited for
-	// before the database closes (the defers above)
+	// the database closes after these are done
 	var wg sync.WaitGroup
 	defer wg.Wait()
 	defer stop() // runs before wg.Wait
-	startTick := func() {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			tick(ctx, svc, cfg.Tick)
-		}()
-	}
 
-	if b != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			h := events.New(svc)
-			err := b.Consume(ctx, contracts.ListenSubjects, h.Handle,
-				startTick, // the stream exists: publishing works now
-				func(subject string, err error) {
-					_ = pub.Publish(context.Background(), contracts.SubjectAlert, contracts.Alert{
-						Service: "catalog", Level: "error", Text: "Un eveniment " + subject + " a eșuat de prea multe ori: " + err.Error(),
-					})
-				})
-			if err != nil && !errors.Is(err, context.Canceled) {
-				errc <- err
-			}
-		}()
-	} else {
-		startTick()
-	}
-
-	srv := &http.Server{
-		Addr:              cfg.Addr,
-		Handler:           api.New(svc, db, cfg.ImportEnabled, log),
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      30 * time.Second,
-	}
+	failed := make(chan error, 1)
+	wg.Add(2)
 	go func() {
-		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errc <- err
+		defer wg.Done()
+		tick(ctx, svc, cfg.Tick)
+	}()
+	go func() {
+		defer wg.Done()
+		err := streams.Consume(ctx, nc, streams.Food, streams.ConsumerCatalog, events.New(svc).Handle, log,
+			streams.OnStuck(func(subject string, err error) {
+				_ = pub.Publish(context.Background(), food.SubjectAlert, food.Alert{
+					Service: "catalog", Level: "error", Text: "Un eveniment " + subject + " a eșuat de prea multe ori: " + err.Error(),
+				})
+			}))
+		if err != nil {
+			failed <- err
 		}
 	}()
-	log.Info("catalog started", "addr", cfg.Addr, "db", cfg.DBPath, "nats", cfg.NATSURL,
-		"analysis", cfg.AnalysisEnabled, "embeddings", cfg.EmbedEnabled, "analysis_timeout", cfg.AnalysisTimeout.String(),
-		"import", cfg.ImportEnabled, "additional_logs", cfg.AdditionalLogs, "log_console", cfg.LogConsole, "tick", cfg.Tick)
+	log.Info("catalog started", "db", cfg.DBPath, "analysis", cfg.AnalysisEnabled, "embeddings", cfg.EmbedEnabled,
+		"analysis_timeout", cfg.AnalysisTimeout.String(), "additional_logs", cfg.AdditionalLogs, "tick", cfg.Tick)
 
 	select {
-	case err = <-errc:
-		stop()
+	case err = <-failed:
 	case <-ctx.Done():
 	}
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = srv.Shutdown(shutdownCtx)
+	stop()
+	_ = nc.Drain() // answer the requests already received
 	return err
 }
 

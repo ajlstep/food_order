@@ -35,6 +35,13 @@ type echo struct {
 
 func start(t *testing.T) *httptest.Server {
 	t.Helper()
+	srv, _ := startWithConn(t)
+	return srv
+}
+
+// startWithConn also gives the connection, to answer as another fake service.
+func startWithConn(t *testing.T) (*httptest.Server, *nats.Conn) {
+	t.Helper()
 	ns, err := server.NewServer(&server.Options{Port: -1, NoLog: true, NoSigs: true})
 	if err != nil {
 		t.Fatal(err)
@@ -58,7 +65,7 @@ func start(t *testing.T) *httptest.Server {
 	h := Handler(access.New(key, access.NewRPCResolver(client, timeout), log), forward.New(client, timeout, log), nc.IsConnected)
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
-	return srv
+	return srv, nc
 }
 
 // fakeUsers: external id "7" is active, "8" waits for its email. Channels

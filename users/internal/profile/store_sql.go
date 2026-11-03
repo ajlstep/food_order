@@ -23,6 +23,37 @@ func (s *SQLStore) InTx(ctx context.Context, fn func(Tx) error) error {
 	return db.InTx(ctx, s.conn, func(q db.Queryer) error { return fn(&SQLStore{q: q}) })
 }
 
+// DueCandidates implements Store. One row per saved setting; a person with
+// none has one row with NULLs.
+func (s *SQLStore) DueCandidates(ctx context.Context) ([]DueCandidate, error) {
+	rows, err := s.q.QueryContext(ctx, `SELECT u.id, us.key, us.value
+		FROM users u LEFT JOIN user_settings us ON us.user_id = u.id
+		WHERE u.status = 'active'
+		  AND EXISTS (SELECT 1 FROM identities i WHERE i.user_id = u.id AND i.status = 'active')
+		ORDER BY u.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DueCandidate
+	for rows.Next() {
+		var (
+			id         string
+			key, value sql.NullString
+		)
+		if err := rows.Scan(&id, &key, &value); err != nil {
+			return nil, err
+		}
+		if len(out) == 0 || out[len(out)-1].UserID != id {
+			out = append(out, DueCandidate{UserID: id, Saved: map[string]string{}})
+		}
+		if key.Valid {
+			out[len(out)-1].Saved[key.String] = value.String
+		}
+	}
+	return out, rows.Err()
+}
+
 // ---------------------------------------------------------------- account
 
 // Account implements AccountStore.

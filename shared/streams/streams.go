@@ -12,6 +12,9 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
+
+	"food-order/shared/contracts/food"
+	"food-order/shared/contracts/notify"
 )
 
 // Names of the streams.
@@ -28,6 +31,10 @@ const keep = 7 * 24 * time.Hour
 // its own consumer, and cannot create others (see nuts/nats.conf).
 const (
 	ConsumerBotTelegram = "bot-telegram" // the bot reads notify.telegram
+	ConsumerNotifier    = "notifier"     // the gateway reads the events meant for people
+	ConsumerCore        = "core"
+	ConsumerCatalog     = "catalog"
+	ConsumerParser      = "parser"
 )
 
 // Ensure creates the streams and consumers, or brings them to this
@@ -46,17 +53,47 @@ func Ensure(ctx context.Context, js jetstream.JetStream) error {
 		}
 	}
 
-	_, err := js.CreateOrUpdateConsumer(ctx, Notify, jetstream.ConsumerConfig{
-		Durable:       ConsumerBotTelegram,
-		FilterSubject: "notify.telegram",
-		AckPolicy:     jetstream.AckExplicitPolicy,
-		AckWait:       30 * time.Second,
-		DeliverPolicy: jetstream.DeliverAllPolicy, // nothing is lost while the bot is down
-	})
-	if err != nil {
-		return fmt.Errorf("streams: consumer %s: %w", ConsumerBotTelegram, err)
+	consumers := []struct {
+		stream string
+		cfg    jetstream.ConsumerConfig
+	}{
+		{Notify, jetstream.ConsumerConfig{
+			Durable:       ConsumerBotTelegram,
+			FilterSubject: notify.Subject(notify.ChannelTelegram),
+			AckPolicy:     jetstream.AckExplicitPolicy,
+			AckWait:       30 * time.Second,
+			DeliverPolicy: jetstream.DeliverAllPolicy, // nothing is lost while the bot is down
+		}},
+		{Food, jetstream.ConsumerConfig{
+			Durable:        ConsumerNotifier,
+			FilterSubjects: notify.Events,
+			AckPolicy:      jetstream.AckExplicitPolicy,
+			AckWait:        30 * time.Second,
+			DeliverPolicy:  jetstream.DeliverNewPolicy, // the first time: no old alerts
+		}},
+		{Food, foodConsumer(ConsumerCore, 30*time.Second, food.SubjectMenuReady, food.SubjectMenuError,
+			food.SubjectRecommendationGenerated, food.SubjectFeedbackParsed)},
+		{Food, foodConsumer(ConsumerCatalog, 30*time.Second, food.SubjectMenuFetched, food.SubjectDishAnalyzed, food.SubjectDishEmbedded)},
+		{Food, foodConsumer(ConsumerParser, ParserTimeout+30*time.Second, food.SubjectMenuRequested)},
+	}
+	for _, c := range consumers {
+		if _, err := js.CreateOrUpdateConsumer(ctx, c.stream, c.cfg); err != nil {
+			return fmt.Errorf("streams: consumer %s: %w", c.cfg.Durable, err)
+		}
 	}
 	return nil
+}
+
+// foodConsumer is the consumer of a service on FOOD. Everything is delivered:
+// an answer to a request of the service must not be lost.
+func foodConsumer(name string, ackWait time.Duration, subjects ...string) jetstream.ConsumerConfig {
+	return jetstream.ConsumerConfig{
+		Durable:        name,
+		FilterSubjects: subjects,
+		AckPolicy:      jetstream.AckExplicitPolicy,
+		AckWait:        ackWait,
+		DeliverPolicy:  jetstream.DeliverAllPolicy,
+	}
 }
 
 // ErrNotReady is returned by WaitAndEnsure when the broker did not come up in time.

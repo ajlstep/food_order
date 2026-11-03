@@ -75,29 +75,10 @@ func TestFind(t *testing.T) {
 	}
 }
 
-func TestDueAndNextOrderDay(t *testing.T) {
+func TestNextOrderDay(t *testing.T) {
 	s := WithDefaults(map[string]string{KeyOrderTime: "16:00"}) // Monday–Friday
 	loc := s.Location()
 	at := func(day, h, m int) time.Time { return time.Date(2026, 10, day, h, m, 0, 0, loc) }
-	// 2026-10-30 is a Friday, 2026-11-02 a Monday
-
-	if _, ok := s.Due(at(30, 15, 59), time.Hour); ok {
-		t.Error("before the order time it must not be due")
-	}
-	d, ok := s.Due(at(30, 16, 0), time.Hour)
-	if !ok || d.Format("2006-01-02") != "2026-11-02" {
-		t.Errorf("Friday 16:00 -> %v %v, want Monday 2026-11-02", d, ok)
-	}
-	if _, ok := s.Due(at(30, 17, 0), time.Hour); ok {
-		t.Error("after the window it must not be due")
-	}
-	if _, ok := s.Due(at(31, 16, 10), time.Hour); ok {
-		t.Error("Saturday is not an order day")
-	}
-	// the time zone of the user counts, not the one of the server
-	if _, ok := s.Due(time.Date(2026, 10, 30, 14, 5, 0, 0, time.UTC), time.Hour); !ok {
-		t.Error("14:05 UTC is 16:05 in Chisinau: must be due")
-	}
 
 	if got := s.NextOrderDay(at(28, 10, 0)).Format("2006-01-02"); got != "2026-10-29" {
 		t.Errorf("next after Wednesday = %s", got)
@@ -118,5 +99,45 @@ func TestBadSavedValuesFallBack(t *testing.T) {
 	}
 	if s["future_key"] != "x" {
 		t.Error("unknown keys must be kept")
+	}
+}
+
+func TestNewSettings(t *testing.T) {
+	cases := []struct{ key, in, want string }{
+		{KeyRecFor, "Azi", "today"},
+		{KeyRecFor, "mâine", "tomorrow"},
+		{KeyNotifyPersonal, "NU", "false"},
+		{KeyNotifyGroup, "da", "true"},
+	}
+	for _, c := range cases {
+		d, err := Find(c.key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := d.Parse(c.in)
+		if err != nil || got != c.want {
+			t.Errorf("%s %q = %q, %v", c.key, c.in, got, err)
+		}
+	}
+	d, _ := Find(KeyRecFor)
+	if _, err := d.Parse("poimâine"); err == nil {
+		t.Error("a word that is not azi/mâine must be refused")
+	}
+}
+
+func TestToggle(t *testing.T) {
+	cases := []struct{ key, in, want string }{
+		{KeyRecFor, "tomorrow", "today"},
+		{KeyRecFor, "today", "tomorrow"},
+		{KeyNotifyPersonal, "true", "false"},
+		{KeyNotifyGroup, "false", "true"},
+	}
+	for _, c := range cases {
+		if got, err := Toggle(c.key, c.in); err != nil || got != c.want {
+			t.Errorf("Toggle(%s, %s) = %q, %v", c.key, c.in, got, err)
+		}
+	}
+	if _, err := Toggle(KeyOrderTime, "16:00"); err == nil {
+		t.Error("the order time has no toggle")
 	}
 }

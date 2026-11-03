@@ -1,6 +1,9 @@
 services:
+  # dishes, menus, partners; talks only over NATS (no ports)
   catalog:
-    build: .
+    build:
+      context: ..                 # project root: the build needs ../shared
+      dockerfile: catalog/Dockerfile
     image: food_order/catalog
     container_name: catalog
     env_file:
@@ -8,8 +11,8 @@ services:
         required: false
     environment:
       CATALOG_DB_PATH: /data/catalog.db
-    ports:
-      - "127.0.0.1:9082:9082"
+      CATALOG_NATS_URL: nats://nats:4222   # in Docker the server is always here, whatever .env says
+      CATALOG_PARTNERS_FILE: /etc/catalog/partners.json
     volumes:
       - catalog-data:/data
     networks:

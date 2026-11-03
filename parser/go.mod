@@ -3,6 +3,7 @@ module food-order/parser
 go 1.25.0
 
 require (
+	food-order/shared v0.0.0
 	github.com/PuerkitoBio/goquery v1.13.0
 	github.com/nats-io/nats.go v1.47.0
 )
@@ -16,3 +17,5 @@ require (
 	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 )
+
+replace food-order/shared => ../shared

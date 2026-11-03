@@ -1,0 +1,21 @@
+{
+  "partners": [
+    {
+      "key": "bistro",
+      "name": "Bistro",
+      "source": "parser",
+      "schedule": [
+        {
+          "days": [1, 2, 3, 4, 5],
+          "days_before": 0,
+          "order_until": "10:00",
+          "delivery_from": "11:30",
+          "delivery_to": "13:30"
+        }
+      ],
+      "closed": [
+        { "date": "2026-12-25", "reason": "Crăciun" }
+      ]
+    }
+  ]
+}

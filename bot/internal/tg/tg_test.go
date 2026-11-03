@@ -3,10 +3,13 @@ package tg
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-telegram/bot/models"
 
-	"food-order/bot/internal/contracts"
+	contracts "food-order/shared/contracts/core"
+	"food-order/shared/contracts/food"
+	"food-order/shared/contracts/users"
 )
 
 func f(v float64) *float64 { return &v }
@@ -22,6 +25,9 @@ func TestCallbackRoundTrip(t *testing.T) {
 		{encodeRate(99, 4), Callback{Kind: kindRate, OrderID: 99, Rating: 4}},
 		{encodeNoNote(99), Callback{Kind: kindNoNote, OrderID: 99}},
 		{encodeAllergen("2026-10-29", 12, true), Callback{Kind: kindAllergen, Date: "2026-10-29", DishID: 12, Yes: true}},
+		{encodeToggle("notify_personal"), Callback{Kind: kindToggle, Key: "notify_personal"}},
+		{encodeResend(), Callback{Kind: kindResend}},
+		{encodeOtherEmail(), Callback{Kind: kindOtherEmail}},
 	}
 	for _, c := range cases {
 		got, err := decodeCallback(c.data)
@@ -30,7 +36,7 @@ func TestCallbackRoundTrip(t *testing.T) {
 		}
 		if got.Kind != c.want.Kind || got.Date != c.want.Date || got.DishID != c.want.DishID ||
 			got.Forced != c.want.Forced || got.OrderID != c.want.OrderID || got.Rating != c.want.Rating ||
-			got.Yes != c.want.Yes || (got.Price == nil) != (c.want.Price == nil) ||
+			got.Yes != c.want.Yes || got.Key != c.want.Key || (got.Price == nil) != (c.want.Price == nil) ||
 			(got.Price != nil && *got.Price != *c.want.Price) {
 			t.Errorf("%s: got %+v, want %+v", c.data, got, c.want)
 		}
@@ -41,7 +47,7 @@ func TestCallbackRoundTrip(t *testing.T) {
 }
 
 func TestCallbackBad(t *testing.T) {
-	for _, d := range []string{"", "x:1", "o:2026:1:0:-", "r:1:9", "r:abc:3", "o:20261029:1:0:abc", "a:20261029:1"} {
+	for _, d := range []string{"", "z:1", "x:", "sr", "o:2026:1:0:-", "r:1:9", "r:abc:3", "o:20261029:1:0:abc", "a:20261029:1"} {
 		if _, err := decodeCallback(d); err == nil {
 			t.Errorf("%q: expected an error", d)
 		}
@@ -61,7 +67,7 @@ var picks = []contracts.Pick{
 }
 
 func TestRecommendationText(t *testing.T) {
-	s := recommendationText("2026-10-29", picks)
+	s := recommendationText("2026-10-29", picks, time.UTC)
 	for _, want := range []string{"joi, 29 oct", "Ciorbă de pui", "45 lei", "~280–380 kcal", "posibil: gluten, ouă", "52,50 lei", "&lt;de casă&gt;"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("text has no %q:\n%s", want, s)
@@ -98,29 +104,44 @@ func TestToggleForced(t *testing.T) {
 }
 
 func TestApplyPrefsCommand(t *testing.T) {
-	cur := contracts.Prefs{Items: []contracts.Pref{{ID: 1, Kind: "allergen", Value: "lapte", Hard: true}}}
+	cur := foodProfile{Allergens: []string{"lapte"}, Prefs: []users.Pref{{Kind: users.PrefLike, Value: "supă"}}}
 
 	next, changed, err := applyPrefsCommand(cur, "add nu! Ciuperci Pleurotus")
-	if err != nil || !changed || len(next.Items) != 2 {
+	if err != nil || !changed || len(next.Prefs) != 2 {
 		t.Fatalf("add: %v %v %+v", changed, err, next)
 	}
-	if p := next.Items[1]; p.Kind != "dislike" || !p.Hard || p.Value != "ciuperci pleurotus" {
+	if p := next.Prefs[1]; p.Kind != users.PrefDislike || !p.Hard || p.Value != "ciuperci pleurotus" {
 		t.Fatalf("added = %+v", p)
 	}
-	if len(cur.Items) != 1 {
+	if len(cur.Prefs) != 1 {
 		t.Fatal("the current list must not be changed in place")
 	}
 
+	next, changed, err = applyPrefsCommand(cur, "add alergen Gluten")
+	if err != nil || !changed || len(next.Allergens) != 2 || next.Allergens[1] != "gluten" || len(next.Prefs) != 1 {
+		t.Fatalf("add allergen: %v %v %+v", changed, err, next)
+	}
 	if _, changed, _ := applyPrefsCommand(cur, "add alergen LAPTE"); changed {
 		t.Fatal("a duplicate must not be added")
 	}
-
-	next, changed, err = applyPrefsCommand(next, "del 1")
-	if err != nil || !changed || len(next.Items) != 1 || next.Items[0].Kind != "dislike" {
-		t.Fatalf("del: %v %v %+v", changed, err, next)
+	if _, changed, _ := applyPrefsCommand(cur, "add place SUPĂ"); changed {
+		t.Fatal("a duplicate must not be added")
 	}
 
-	for _, bad := range []string{"add", "add ceva x", "del 5", "del x", "sterge 1"} {
+	// the numbers on screen: the allergens first, then the preferences
+	next, changed, err = applyPrefsCommand(cur, "del 1")
+	if err != nil || !changed || len(next.Allergens) != 0 || len(next.Prefs) != 1 {
+		t.Fatalf("del allergen: %v %v %+v", changed, err, next)
+	}
+	next, changed, err = applyPrefsCommand(cur, "del 2")
+	if err != nil || !changed || len(next.Allergens) != 1 || len(next.Prefs) != 0 {
+		t.Fatalf("del pref: %v %v %+v", changed, err, next)
+	}
+	if len(cur.Allergens) != 1 || len(cur.Prefs) != 1 {
+		t.Fatal("the current lists must not be changed in place")
+	}
+
+	for _, bad := range []string{"add", "add ceva x", "del 5", "del 0", "del x", "sterge 1"} {
 		if _, _, err := applyPrefsCommand(cur, bad); err != errPrefsUsage {
 			t.Errorf("%q: err = %v", bad, err)
 		}
@@ -130,12 +151,25 @@ func TestApplyPrefsCommand(t *testing.T) {
 	}
 }
 
+func TestPrefsTextNumbersMatchDelete(t *testing.T) {
+	f := foodProfile{Allergens: []string{"lapte"}, Prefs: []users.Pref{
+		{Kind: users.PrefLike, Value: "supă"},
+		{Kind: users.PrefDislike, Value: "ceapă", Hard: true},
+	}}
+	got := prefsText(f)
+	for _, want := range []string{"1. lapte", "2. supă", "3. ceapă (niciodată)"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("no %q in %s", want, got)
+		}
+	}
+}
+
 func TestTextsDoNotPanic(t *testing.T) {
 	r := 4
 	_ = historyText([]contracts.Order{{ID: 1, Date: "2026-10-28", DishName: "Supă", Rating: &r, Forced: true, Comment: "prea sărat"}}, 15)
 	_ = statsText(contracts.Stats{From: "2026-10-01", To: "2026-10-28", Orders: 3, Spent: 140, Kcal: &contracts.Range{Min: 900, Max: 1200}})
-	_ = prefsText(contracts.Prefs{Items: []contracts.Pref{{Kind: "like", Value: "supă"}}})
-	_ = alertText(contracts.Alert{Service: "core", Level: "error", Text: "<nu e meniu>"})
+	_ = prefsText(foodProfile{})
+	_ = alertText(food.Alert{Service: "core", Level: "error", Text: "<nu e meniu>"})
 	_ = ratingKeyboard(1)
 	_ = models.InlineKeyboardMarkup{}
 }

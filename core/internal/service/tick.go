@@ -6,10 +6,15 @@ import (
 	"time"
 
 	"food-order/core/internal/applog"
-	"food-order/core/internal/bus"
-	"food-order/core/internal/contracts"
 	"food-order/core/internal/store"
+	"food-order/shared/contracts/core"
+	"food-order/shared/contracts/food"
+	"food-order/shared/events"
 )
+
+// keepProcessed is longer than the stream keeps messages (7 days), so an id
+// that was forgotten can no longer come back.
+const keepProcessed = 8 * 24 * time.Hour
 
 // Tick is one round of the scheduler (the menu scheduler module of core).
 // Every step is safe to repeat: the database says what was done already,
@@ -20,6 +25,7 @@ func (s *Service) Tick(ctx context.Context) {
 		fn   func(context.Context) error
 	}{
 		{"daily menu", s.dailyMenu},
+		{"order time", s.orderTime},
 		{"expire menu requests", s.expireMenus},
 		{"retry menu requests", s.retryMenus},
 		{"waiting recommendations", s.sweepWaiting},
@@ -29,7 +35,7 @@ func (s *Service) Tick(ctx context.Context) {
 		{"forget old events", s.forgetEvents},
 	}
 	tickStart := time.Now()
-	ctx = applog.With(ctx, "job", "scheduler", "tick_id", bus.NewID(tickStart))
+	ctx = applog.With(ctx, "job", "scheduler", "tick_id", events.NewID(tickStart))
 	for _, st := range steps {
 		if ctx.Err() != nil {
 			return
@@ -43,6 +49,30 @@ func (s *Service) Tick(ctx context.Context) {
 		s.Log.DebugContext(sctx, "scheduler step done", "ms", applog.Since(start))
 	}
 	s.Log.DebugContext(ctx, "scheduler tick done", "steps", len(steps), "ms", applog.Since(tickStart))
+}
+
+// orderTime: asks users who has the order time now and starts their
+// recommendation. It is safe to repeat: one that exists for the day (made
+// here or by /meniu) is left alone, so each person gets one a day. A failure
+// is only logged: the window is long, and the next tick asks again.
+func (s *Service) orderTime(ctx context.Context) error {
+	due, err := s.Users.Due(ctx, s.Now(), s.Cfg.OrderWindow)
+	if err != nil {
+		return err
+	}
+	for _, d := range due {
+		_, err := s.Store.LatestRec(ctx, d.UserID, d.ForDate)
+		switch {
+		case err == nil:
+			continue
+		case !errors.Is(err, store.ErrNotFound):
+			return err
+		}
+		if _, err := s.RequestRecommendation(ctx, d.UserID, d.ForDate); err != nil {
+			s.Log.WarnContext(ctx, "automatic recommendation not started", "user_id", d.UserID, "date", d.ForDate, "err", err)
+		}
+	}
+	return nil
 }
 
 // dailyMenu: from CORE_MENU_REQUEST_TIME on, ask once for the menu of the
@@ -72,7 +102,7 @@ func (s *Service) expireMenus(ctx context.Context) error {
 		s.Log.WarnContext(ctx, "menu request expired without an answer", "request_id", m.RequestID, "date", m.DateFrom,
 			"attempts", m.Attempts, "requested_at", m.RequestedAt, "timeout", s.Cfg.MenuTimeout)
 		msg := "niciun răspuns în " + s.Cfg.MenuTimeout.String()
-		if err := s.menuFailed(ctx, m, contracts.MenuErrSourceUnavailable, msg, store.MenuExpired); err != nil {
+		if err := s.menuFailed(ctx, m, food.MenuErrSourceUnavailable, msg, store.MenuExpired); err != nil {
 			return err
 		}
 	}
@@ -139,9 +169,6 @@ func (s *Service) llmTimeouts(ctx context.Context) error {
 // republish sends food.recommendation.ready again for the ready ones the
 // bot never got (the broker was down when they were finished).
 func (s *Service) republish(ctx context.Context) error {
-	if _, off := s.Bus.(bus.Off); off {
-		return nil
-	}
 	recs, err := s.Store.RecsUnnotified(ctx, s.today())
 	if err != nil {
 		return err
@@ -172,10 +199,7 @@ func (s *Service) askRatings(ctx context.Context) error {
 	}
 	for _, o := range orders {
 		s.Log.DebugContext(ctx, "rating question", "order", o.ID, "user_id", o.UserID, "date", o.Date, "dish", o.DishName)
-		err := s.publish(ctx, contracts.SubjectRatingRequested, contracts.RatingRequested{UserID: o.UserID, OrderID: o.ID})
-		if errors.Is(err, bus.ErrOff) {
-			return nil
-		}
+		err := s.publish(ctx, food.SubjectRatingRequested, core.RatingRequested{UserID: o.UserID, OrderID: o.ID})
 		if err != nil {
 			return nil // broker down: next tick
 		}
@@ -187,7 +211,7 @@ func (s *Service) askRatings(ctx context.Context) error {
 }
 
 func (s *Service) forgetEvents(ctx context.Context) error {
-	before := s.Now().Add(-s.Cfg.NATSMaxAge - 24*time.Hour)
+	before := s.Now().Add(-keepProcessed)
 	s.Log.DebugContext(ctx, "forgetting processed event ids", "before", before)
 	return s.Store.ForgetProcessed(ctx, before)
 }

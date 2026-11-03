@@ -18,7 +18,7 @@ import (
 	_ "github.com/ncruces/go-sqlite3/driver" // database/sql driver "sqlite3", pure Go (no CGO)
 	_ "github.com/ncruces/go-sqlite3/embed"  // the SQLite library itself
 
-	"food-order/catalog/internal/contracts"
+	contracts "food-order/shared/contracts/catalog"
 )
 
 // ErrNotFound is returned when a row does not exist.
@@ -69,9 +69,6 @@ func Open(path string) (*Store, error) {
 
 // Close closes the database.
 func (s *Store) Close() error { return s.db.Close() }
-
-// Ping checks the database (for /healthz).
-func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
 
 // migrations: append new steps, never change old ones.
 var migrations = []string{
@@ -154,8 +151,32 @@ var migrations = []string{
 		status TEXT,                       -- pending | analyzed | confirmed
 		model TEXT,
 		analyzed_at TEXT,
-		confirmed_by INTEGER,              -- + users.id of who confirmed (no FK: other database)
+		confirmed_by TEXT,                 -- + user_id of who confirmed (no FK: other service)
 		confirmed_at TEXT                  -- +
+	);
+
+	CREATE TABLE partners (                -- who cooks; a property of the partner, not of a menu
+		id INTEGER PRIMARY KEY,
+		key TEXT NOT NULL UNIQUE,          -- stable name in partners.json
+		name TEXT NOT NULL,
+		source TEXT NOT NULL UNIQUE        -- the "source" of its menus: parser | api
+	);
+
+	CREATE TABLE partner_schedule (        -- one row per weekday it works
+		partner_id INTEGER NOT NULL REFERENCES partners(id) ON DELETE CASCADE,
+		weekday INTEGER NOT NULL,          -- ISO, 1 = Monday
+		days_before INTEGER NOT NULL DEFAULT 0, -- order this many days before the meal
+		order_until TEXT NOT NULL,         -- 10:30, on that day
+		delivery_from TEXT NOT NULL DEFAULT '',
+		delivery_to TEXT NOT NULL DEFAULT '',
+		PRIMARY KEY (partner_id, weekday)
+	);
+
+	CREATE TABLE partner_closures (        -- days it does not work although the schedule says so
+		partner_id INTEGER NOT NULL REFERENCES partners(id) ON DELETE CASCADE,
+		date TEXT NOT NULL,
+		reason TEXT NOT NULL DEFAULT '',
+		PRIMARY KEY (partner_id, date)
 	);
 
 	CREATE TABLE embeddings (

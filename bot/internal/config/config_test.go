@@ -15,10 +15,12 @@ func getter(m map[string]string) func(string, string) string {
 }
 
 const goodSecret = "0123456789abcdef0123"
+const goodKey = "0123456789abcdef0123456789abcdef"
 
 func TestParseWebhook(t *testing.T) {
 	cfg, err := parse(getter(map[string]string{
 		EnvTelegramToken: "123:abc",
+		EnvGatewayKey:    goodKey,
 		EnvAdminChatID:   "42",
 		EnvWebhookURL:    "https://ajl.duckdns.org/tg/webhook",
 		EnvWebhookSecret: goodSecret,
@@ -32,7 +34,7 @@ func TestParseWebhook(t *testing.T) {
 }
 
 func TestParseWebhookErrors(t *testing.T) {
-	base := map[string]string{EnvTelegramToken: "1:a"}
+	base := map[string]string{EnvTelegramToken: "1:a", EnvGatewayKey: goodKey}
 	cases := map[string]map[string]string{
 		"missing url":  {EnvWebhookSecret: goodSecret},
 		"http url":     {EnvWebhookURL: "http://x.org/tg", EnvWebhookSecret: goodSecret},
@@ -58,14 +60,15 @@ func TestParseWebhookErrors(t *testing.T) {
 func TestParseDefaults(t *testing.T) {
 	cfg, err := parse(getter(map[string]string{
 		EnvTelegramToken: "123:abc",
+		EnvGatewayKey:    goodKey,
 		EnvAdminChatID:   "42",
 		EnvMode:          "polling",
 	}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AdminChatID != 42 || cfg.CoreURL != "http://core:9081" || cfg.NATSStream != "FOOD" || cfg.Addr != ":9001" ||
-		cfg.DBPath != "data/bot.db" || len(cfg.AllowedChats) != 0 {
+	if cfg.AdminChatID != 42 || cfg.GatewayURL != "http://gateway:8080" ||
+		cfg.NATSUser != "bot" || cfg.Addr != ":8086" || len(cfg.AllowedChats) != 0 {
 		t.Fatalf("unexpected defaults: %+v", cfg)
 	}
 }
@@ -74,14 +77,12 @@ func TestParseErrors(t *testing.T) {
 	_, err := parse(getter(map[string]string{
 		EnvAdminChatID:  "not-a-number",
 		EnvAllowedChats: "1, x",
-		EnvNATSToken:    "t",
-		EnvNATSUser:     "u",
 		EnvHTTPTimeout:  "abc",
 	}))
 	if err == nil {
 		t.Fatal("expected an error")
 	}
-	for _, want := range []string{EnvTelegramToken, EnvAdminChatID, EnvAllowedChats, EnvHTTPTimeout, EnvNATSToken} {
+	for _, want := range []string{EnvTelegramToken, EnvAdminChatID, EnvAllowedChats, EnvGatewayKey, EnvHTTPTimeout} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error does not mention %s: %v", want, err)
 		}
@@ -106,7 +107,7 @@ func TestParseEnv(t *testing.T) {
 
 func TestAllowedChats(t *testing.T) {
 	cfg, err := parse(getter(map[string]string{
-		EnvTelegramToken: "1:a", EnvMode: "polling", EnvAllowedChats: "42, 7,9",
+		EnvTelegramToken: "1:a", EnvGatewayKey: goodKey, EnvMode: "polling", EnvAllowedChats: "42, 7,9",
 	}))
 	if err != nil {
 		t.Fatal(err)

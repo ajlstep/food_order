@@ -7,7 +7,7 @@ services:
     env_file:
       - .env
     ports:
-      # only this computer: the old services have no password yet (see nats.conf, "legacy")
+      # only this computer: the services reach it on the Docker network
       - "127.0.0.1:4222:4222"   # client
       - "127.0.0.1:8222:8222"   # HTTP monitor
     volumes:

@@ -1,38 +1,36 @@
 # core — food-order
 
-Serviciul de **business logic**. Pe `user_id` (= `users.id` din `bot.db`) ține comenzile cu snapshot-ul felului, notele, comentariile, etichetele și preferințele de mâncare; cere meniul (unul pentru toți), aplică filtrele dure, calculează scorul, orchestrează recomandarea (`catalog` → scor → `llm` → `bot`) și face statistica. Nu are tabel de utilizatori și nu vede date personale.
+Serviciul de **business logic**. Pe `user_id` (id-ul din `users`, text) ține comenzile cu snapshot-ul felului și adresa unde merg, notele, comentariile și etichetele; preferințele și alergenii îi cere de la `users`; cere meniul (unul pentru toți), aplică filtrele dure, calculează scorul, orchestrează recomandarea (`catalog` → scor → `llm` → `bot`) și face statistica. Nu are tabel de utilizatori și nu vede date personale.
 
-Notițe: Obsidian `projects/food-order/Core`, `Comunicare`, `Arhitectura`.
+Notițe: Obsidian `projects/food-order/Core`, `Comunicare`, `Arhitectura`, `etape/E7-E8-Core-Catalog`.
 
 ## Pornire
 
 ```bash
-go mod tidy              # prima dată (go.sum e copiat din bot, dar tidy îl completează dacă lipsește ceva)
 go test ./...
-cp .env.example .env     # opțional: toate valorile au implicit
-go run .                 # sau: go run . -env alt.env ; -debug arată de ce a fost exclus un fel
+cp .env.example .env     # sau ../init-env.sh
+go run .                 # sau: go run . -env alt.env
 ```
 
-Fără NATS: `CORE_NATS_URL=` (gol) → doar HTTP; meniul nu se cere, iar recomandarea se face doar din scor, fără motiv. Fără `llm` (încă nu există): `CORE_LLM_ENABLED=false` → recomandarea din scor, imediat.
+Vorbește doar prin NATS, nu are port. Cine lucrează cu el trece prin `gateway`. Nu pornește fără NATS. Serviciul `llm` nu există încă, deci implicit `CORE_LLM_ENABLED=false`: recomandarea vine din scor, imediat.
 
-Baza `data/core.db` se creează singură; migrările rulează la pornire (`schema_version`). Driver SQLite: `github.com/ncruces/go-sqlite3` (Go pur, fără CGO), ca în `bot`.
+Baza `data/core.db` se creează singură; migrările rulează la pornire (`schema_version`). Stream-urile și consumatorul `core` le creează `nats-setup`.
 
-**Stream-ul `FOOD`** (`food.>`) îl creează `core` la pornire — `bot` îl așteaptă. Consumatorul durabil al lui `core` se numește `core`.
+## Cereri (NATS, `rpc.core.*`) — vin de la `gateway`, cu persoana în plic
 
-## API (HTTP :9081) — apelat de `bot`, cu `X-User-ID`
+Erorile sunt refuzuri cu cod stabil; textul pentru om e în `details.text`.
 
-Fără `X-User-ID` → `400 missing_user`. Erori: `{"error": {"code", "message"}}`; `message` e în română (botul o arată utilizatorului).
-
-| Cerere | Răspuns |
+| Subiect | Ce face |
 |---|---|
-| `GET /healthz` | `{"status":"ok"}` (verifică și baza) |
-| `POST /v1/recommendations` `{date}` | `202 {date, status, picks[]}` — `waiting_menu` dacă meniul nu e gata (și `core` îl cere), `generating`, sau `ready`. Rezultatul vine ca `food.recommendation.ready`. Dacă una e deja în lucru pentru ziua asta, o întoarce pe aceea (nu dublează). |
-| `GET /v1/recommendations?date=` | ultima recomandare a zilei; `404 not_found` |
-| `POST /v1/orders` `{date, dish_id, price?, forced}` | comanda salvată, cu snapshot de la `catalog`. **O comandă pe zi**: a doua alegere o înlocuiește pe prima; după notă → `409 already_rated`. `catalog` căzut → snapshot din candidații salvați la recomandare, altfel `503 catalog_unavailable`; fel necunoscut → `422 dish_not_in_menu` |
-| `POST /v1/orders/{id}/rating` `{rating 1-5, comment}` | comanda; cu comentariu → `food.feedback.parse.requested` |
-| `GET /v1/orders?from=&to=` | listă, cele vechi întâi (implicit ultimele 30 de zile) |
-| `GET /v1/prefs` · `PUT /v1/prefs` | `{items:[{id, kind, value, hard}]}`; PUT înlocuiește toată lista. `kind` ∈ `allergen` (mereu dur), `dislike`, `like`, `diet`, `target` |
-| `GET /v1/stats?from=&to=` | cheltuieli, „din lipsă" (nr. și %), nota medie, kcal/proteine/grăsimi/glucide ca interval (min și max adunate separat), `without_nutrition`, `top_dishes`, `days[]`, `months[]` |
+| `recommendations.create` `{date}` | Pornește recomandarea: `waiting_menu`, `generating` sau `ready`. Rezultatul vine ca `food.recommendation.ready`. |
+| `recommendations.get` `{date}` | Ultima recomandare a zilei; `not_found`. |
+| `orders.create` `{date, dish_id, price?, forced, personal}` | Comanda, cu snapshot de la `catalog` și adresa grupului (dacă nu e `personal`). O comandă pe zi: a doua o înlocuiește pe prima. După ora limită a partenerului: `order_closed`. |
+| `orders.rate` `{order_id, rating, comment}` | Nota; cu comentariu pleacă `food.feedback.parse.requested`. |
+| `orders.list` `{from, to}` | Comenzile, cele vechi întâi. |
+| `stats` `{from, to}` | Cheltuieli, „din lipsă”, nota medie, kcal și macro ca interval. |
+| `reports.company` `{from, to}` | Cine, când și ce a comandat la adresele companiei. Doar proprietarul companiei (întreabă `users`). Comenzile personale nu apar. |
+
+`core` întreabă singur: `rpc.catalog.menu.get`, `dishes.get`, `similar` și `rpc.users.profile.food.get`, `profile.due`, `org.snapshot`, `org.company.get`. În `nuts/nats.conf` are drept doar la acestea.
 
 ## Evenimente (NATS JetStream)
 
@@ -54,42 +52,22 @@ Plicul comun `{id, type, version, ts, data}`; `id` e ULID și e și `Nats-Msg-Id
 - `food.recommendation.ready` nepublicat (broker căzut) → republicat
 - de la `CORE_RATING_TIME` (10:00) → `food.rating.requested` pentru mesele nenotate din ultimele `CORE_RATING_LOOKBACK_DAYS` zile, o dată per comandă
 
-Ora recomandării **nu** e aici: botul apelează `POST /v1/recommendations` la ora de comandă a fiecăruia.
+- la fiecare tick întreabă `users` cine are acum ora de comandă (`rpc.users.profile.due`, în fereastra `CORE_ORDER_WINDOW`) și pornește recomandarea pentru cine nu o are deja
 
 ## Recomandarea
 
-1. `GET /v1/menu?date=` la `catalog` → felurile zilei
+1. `rpc.catalog.menu.get` → felurile zilei; ce nu se mai poate comanda (partener închis, a trecut ora limită) iese din listă
 2. **filtre dure**: alergeni (sursa > confirmați > ghiciți de model; plus cuvinte-cheie ro/ru pe nume și componente: „lapte" prinde și smântână, brânză, сметана…), `dislike` dur, `diet` dur (felul trebuie să o conțină în nume/componente/etichete)
-3. **scor** (`internal/rules`), ponderi în `CORE_SCORE_WEIGHTS`: nota (medie bayesiană), frecvența alegerilor „ne-din-lipsă" (relativ la alternativele zilei), similitudinea (`POST /v1/similar`, dacă merge), `like`/`diet` moale, ținta de calorii, noutate; minus `dislike` moale + etichete de plângere pe comenzile trecute, minus repetiția din ultimele `CORE_SCORE_REPEAT_DAYS` zile
+3. **scor** (`internal/rules`), ponderi în `CORE_SCORE_WEIGHTS`: nota (medie bayesiană), frecvența alegerilor „ne-din-lipsă" (relativ la alternativele zilei), similitudinea (`rpc.catalog.similar`, dacă merge), `like`/`diet` moale, ținta de calorii, noutate; minus `dislike` moale + etichete de plângere pe comenzile trecute, minus repetiția din ultimele `CORE_SCORE_REPEAT_DAYS` zile
 4. primele `CORE_REC_CANDIDATES` → `food.recommendation.requested` (fără date personale, context scurt: ultimele 7 zile, feluri plăcute/neplăcute, preferințe moi, suma lunii)
 5. `food.recommendation.generated` → se păstrează doar id-urile din listă, fără dubluri, maxim `CORE_REC_PICKS`; nimic valid → din scor
 6. `food.recommendation.ready` → `bot`. `allergens_possible` = doar ghicirile modelului neconfirmate (botul întreabă „conține X?")
-
-## Ce am presupus (de confirmat când scrii `catalog`)
-
-`catalog` nu există încă, deci `core` citește tolerant (`{"items": [...]}` sau o listă simplă):
-
-```json
-GET /v1/menu?date=2026-11-02   ->  {"date": "...", "items": [
-  {"id": 12, "name": "LUNCH 1 Stand", "category": "Lunch Box", "price": 63,
-   "weight_g": 350, "weight_text": "250/50", "weight_source": "site",
-   "nutrition": {"kcal": {"min": 600, "max": 800}, "protein_g": {...}, "fat_g": {...}, "carbs_g": {...}},
-   "nutrition_source": "llm",
-   "components": [{"name": "piept de pui", "grams": 120, "method": "boiled"}],
-   "allergens": {"given": [], "confirmed": null, "possible": ["gluten"]},
-   "tags": ["supă", "cald"]}
-]}
-GET /v1/dishes?ids=12,15&date=   ->  {"items": [ ...la fel... ]}
-POST /v1/similar {liked_ids, candidate_ids}  ->  {"scores": [{"id": 15, "score": 0.83}]}
-```
-
-Tipurile sunt în `internal/contracts` (`CatalogDish` etc.).
 
 ## Decizii pentru punctele „De completat" din notiță
 
 Le-am ales eu ca să meargă; schimbă-le dacă vrei altfel:
 
-- **Ținta de calorii**: deocamdată ca preferință în `core` (`kind: target`, `value: kcal=700`, și `protein_g`, `fat_g`, `carbs_g`); se compară mijlocul intervalului (`CORE_SCORE_TARGET_MODE=mid`) sau capătul mai rău (`worst`). Felurile fără valori primesc 0,5 (neutru). Botul nu are încă o comandă pentru ea.
+- **Ținta de calorii**: ca preferință în `users` (`kind: target`, `value: kcal=700`, și `protein_g`, `fat_g`, `carbs_g`); se compară mijlocul intervalului (`CORE_SCORE_TARGET_MODE=mid`) sau capătul mai rău (`worst`). Felurile fără valori primesc 0,5 (neutru). Botul nu are încă o comandă pentru ea.
 - **`llm` nu răspunde la timp**: recomandare din scor, fără motiv (`CORE_LLM_TIMEOUT`).
 - **Revizie nouă de meniu** pentru o zi: oprit implicit (`CORE_REC_REGENERATE_ON_REVISION=false`); pornit → recomandare nouă pentru cine nu a ales încă.
 - **O comandă pe zi** de utilizator; schimbarea alegerii merge până la notă.
@@ -98,22 +76,19 @@ Le-am ales eu ca să meargă; schimbă-le dacă vrei altfel:
 ## Structură
 
 ```
-main.go                 # pornire: config, baza, NATS (stream + consumator), programator, HTTP
+main.go                 # pornire: config, baza, NATS, programator
 internal/config/        # Config, Load, .env, validare (un test verifică .env.example = implicitele)
-internal/contracts/     # tipuri HTTP + evenimente + forma presupusă a lui catalog
-internal/store/         # core.db: orders, prefs, recommendations, menu_requests, processed_events
-internal/catalog/       # client HTTP spre catalog
+internal/store/         # core.db: orders, recommendations, menu_requests, processed_events
+internal/remote/        # cum întreabă core alte servicii, prin NATS
 internal/rules/         # filtrele dure și scorul (determinist)
-internal/service/       # logica: meniu, recomandare, comenzi, preferințe, statistică, tick
+internal/service/       # logica: meniu, recomandare, comenzi, statistică, raport, tick
 internal/events/        # evenimente NATS -> service (idempotent)
-internal/bus/           # NATS JetStream: stream, publish, consumator durabil, ULID
 internal/scheduler/     # bucla programatorului
-internal/api/           # HTTP + teste cap-coadă (catalog fals, broker fals, ceas mutat de test)
+internal/api/           # rpc.core.* + teste cap-coadă (catalog fals, broker fals, ceas mutat de test)
 ```
 
 Coloane în plus față de schema din notiță (pentru programator): `orders.kitchen_feedback`, `rating_requested_at`, `rated_at`, `created_at`, `updated_at`; `recommendations.candidates`, `updated_at`, `notified_at`; `menu_requests.next_retry_at`, `alerted`.
 
 ## De făcut în celelalte servicii
 
-- **parser**: ascultă `food.menu.requested`, trimite `food.menu.fetched` (la `catalog`) sau `food.menu.error` (la `core`) cu codurile `no_menu` / `source_unavailable` / `parse_failed` / `bad_request`. README-ul parserului încă pomenește `food.menu.fetch.requested` / `food.menu.empty` — numele corecte sunt cele din notița `Comunicare`.
-- **parser** are implicit portul `:9082`, același cu `catalog`; în notițe parserul e pe `9083`.
+- **llm**: nu există. Când apare: are nevoie de un utilizator în `nuts/nats.conf` și de `CORE_LLM_ENABLED=true`.

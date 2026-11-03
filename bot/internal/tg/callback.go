@@ -18,20 +18,26 @@ import (
 //	a:<YYYYMMDD>:<dish_id>:<y|n>                        allergens: yes, it may contain them / no
 //	d:<1..7>                                            settings: switch an order day (ISO weekday)
 //	t:<+30|-30>                                         settings: move the order time (minutes)
-//	gi:<invite_id>:<y|n>                                group: accept / decline an invitation
-//	gk:<user_id>                                        group: the owner removes a member
-//	gl:<group_id>                                       group: confirm leaving
+//	x:<key>                                             settings: switch a setting with two values
+//	sr:0                                                sign-up: send the code again
+//	so:0                                                sign-up: use another email
+//	iy:<invite_id>   in:<invite_id>                     accept / decline an invitation
+//	kc:<user_id>     kg:<user_id>                       take a member out of the company / group
 const (
-	kindOrder    = "o"
-	kindForced   = "f"
-	kindRate     = "r"
-	kindNoNote   = "n"
-	kindAllergen = "a"
-	kindDay      = "d"
-	kindTime     = "t"
-	kindInvite   = "gi"
-	kindKick     = "gk"
-	kindLeave    = "gl"
+	kindOrder       = "o"
+	kindForced      = "f"
+	kindRate        = "r"
+	kindNoNote      = "n"
+	kindAllergen    = "a"
+	kindDay         = "d"
+	kindTime        = "t"
+	kindToggle      = "x"
+	kindResend      = "sr"
+	kindOtherEmail  = "so"
+	kindInviteYes   = "iy"
+	kindInviteNo    = "in"
+	kindKickCompany = "kc"
+	kindKickGroup   = "kg"
 )
 
 const callbackMax = 64
@@ -46,9 +52,10 @@ type Callback struct {
 	OrderID int64
 	Rating  int
 	Yes     bool
-	Day     int   // ISO weekday, 1 = Monday
-	Minutes int   // time shift
-	ID      int64 // invite id, user id or group id (group buttons)
+	Day     int    // ISO weekday, 1 = Monday
+	Minutes int    // time shift
+	Key     string // the setting of a toggle
+	ID      string // an invitation or a person
 }
 
 var errBadCallback = errors.New("bad callback data")
@@ -83,17 +90,20 @@ func encodeTime(minutes int) string {
 	return join(kindTime, fmt.Sprintf("%+d", minutes))
 }
 
-func encodeInvite(inviteID int64, accept bool) string {
-	yn := "n"
+func encodeToggle(key string) string { return join(kindToggle, key) }
+
+func encodeResend() string { return join(kindResend, "0") }
+
+func encodeOtherEmail() string { return join(kindOtherEmail, "0") }
+
+func encodeInvite(id string, accept bool) string {
 	if accept {
-		yn = "y"
+		return join(kindInviteYes, id)
 	}
-	return join(kindInvite, strconv.FormatInt(inviteID, 10), yn)
+	return join(kindInviteNo, id)
 }
 
-func encodeKick(userID int64) string { return join(kindKick, strconv.FormatInt(userID, 10)) }
-
-func encodeLeave(groupID int64) string { return join(kindLeave, strconv.FormatInt(groupID, 10)) }
+func encodeKick(kind, userID string) string { return join(kind, userID) }
 
 func join(parts ...string) string {
 	s := strings.Join(parts, ":")
@@ -185,21 +195,20 @@ func decodeCallback(data string) (Callback, error) {
 		if cb.Minutes, err = strconv.Atoi(p[1]); err != nil || cb.Minutes == 0 || cb.Minutes < -720 || cb.Minutes > 720 {
 			return cb, bad
 		}
-	case kindInvite:
-		if len(p) != 3 || (p[2] != "y" && p[2] != "n") {
+	case kindToggle:
+		if len(p) != 2 || p[1] == "" {
 			return cb, bad
 		}
-		if cb.ID, err = strconv.ParseInt(p[1], 10, 64); err != nil || cb.ID <= 0 {
-			return cb, bad
-		}
-		cb.Yes = p[2] == "y"
-	case kindKick, kindLeave:
+		cb.Key = p[1]
+	case kindResend, kindOtherEmail:
 		if len(p) != 2 {
 			return cb, bad
 		}
-		if cb.ID, err = strconv.ParseInt(p[1], 10, 64); err != nil || cb.ID <= 0 {
+	case kindInviteYes, kindInviteNo, kindKickCompany, kindKickGroup:
+		if len(p) != 2 || p[1] == "" {
 			return cb, bad
 		}
+		cb.ID = p[1]
 	default:
 		return cb, bad
 	}
