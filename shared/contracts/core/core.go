@@ -93,6 +93,7 @@ type RecommendationGenerated struct {
 type Pick struct {
 	DishID            int64    `json:"dish_id"`
 	Name              string   `json:"name"`
+	Components        []string `json:"components,omitempty"` // what is in it: "LUNCH 1" alone says nothing
 	Price             *float64 `json:"price,omitempty"`
 	Reason            string   `json:"reason,omitempty"`
 	KcalMin           *float64 `json:"kcal_min,omitempty"`

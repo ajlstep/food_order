@@ -109,7 +109,7 @@ func picksView(rec store.Rec) []contracts.Pick {
 			c = store.Candidate{DishID: p.DishID, Name: "felul #" + strconv.FormatInt(p.DishID, 10)}
 		}
 		out = append(out, contracts.Pick{
-			DishID: c.DishID, Name: c.Name, Price: c.Price, Reason: p.Reason,
+			DishID: c.DishID, Name: c.Name, Components: c.Components, Price: c.Price, Reason: p.Reason,
 			KcalMin: c.KcalMin, KcalMax: c.KcalMax, AllergensPossible: c.AllergensPossible,
 			PartnerName: c.PartnerName, OrderUntilMs: c.OrderUntilMs,
 		})
@@ -236,6 +236,9 @@ func candidateOf(r rules.Scored) store.Candidate {
 		ProteinGMin: snap.ProteinGMin, ProteinGMax: snap.ProteinGMax, FatGMin: snap.FatGMin, FatGMax: snap.FatGMax,
 		CarbsGMin: snap.CarbsGMin, CarbsGMax: snap.CarbsGMax, NutritionSource: snap.NutritionSource,
 		PartnerName: d.PartnerName, OrderUntilMs: d.OrderUntilMs,
+	}
+	for _, part := range d.Components {
+		c.Components = append(c.Components, part.Name)
 	}
 	// only the model's guesses nobody confirmed: the bot asks "contains X?"
 	if d.Allergens.Confirmed == nil && len(d.Allergens.Given) == 0 {

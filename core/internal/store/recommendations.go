@@ -27,6 +27,7 @@ type PickRef struct {
 type Candidate struct {
 	DishID            int64    `json:"dish_id"`
 	Name              string   `json:"name"`
+	Components        []string `json:"components,omitempty"`
 	Price             *float64 `json:"price,omitempty"`
 	Score             float64  `json:"score"`
 	AvgRating         *float64 `json:"avg_rating,omitempty"`

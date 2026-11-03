@@ -765,7 +765,7 @@ func TestOrderLimitOfThePartner(t *testing.T) {
 	day := "2026-11-02"
 	limit := e.now.Add(time.Hour).UnixMilli()
 	e.cat.menu[day] = []catalog.Dish{
-		{ID: 1, Name: "Deschis", PartnerName: "Bistro", OrderUntilMs: limit},
+		{ID: 1, Name: "Deschis", PartnerName: "Bistro", OrderUntilMs: limit, Components: []catalog.DishComponent{{Name: "Supă"}, {Name: "Piure"}}},
 		{ID: 2, Name: "Închis", Closed: true},
 		{ID: 3, Name: "Trecut", OrderUntilMs: e.now.Add(-time.Hour).UnixMilli()},
 	}
@@ -773,7 +773,8 @@ func TestOrderLimitOfThePartner(t *testing.T) {
 
 	var rec contracts.Recommendation
 	e.callOK("/recommendations", 1, contracts.CreateRecommendationRequest{Date: day}, &rec)
-	if len(rec.Picks) != 1 || rec.Picks[0].DishID != 1 || rec.Picks[0].OrderUntilMs != limit || rec.Picks[0].PartnerName != "Bistro" {
+	if len(rec.Picks) != 1 || rec.Picks[0].DishID != 1 || rec.Picks[0].OrderUntilMs != limit || rec.Picks[0].PartnerName != "Bistro" ||
+		len(rec.Picks[0].Components) != 2 || rec.Picks[0].Components[1] != "Piure" {
 		t.Fatalf("picks: %+v", rec.Picks)
 	}
 	if code, _ := e.call("/orders", 1, contracts.CreateOrderRequest{Date: day, DishID: 3}); code != "order_closed" {

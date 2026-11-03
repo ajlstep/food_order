@@ -63,12 +63,12 @@ func TestLongestCallbackFits(t *testing.T) {
 
 var picks = []contracts.Pick{
 	{DishID: 12, Name: "Ciorbă de pui", Price: f(45), Reason: "Ai dat 5 la ea", KcalMin: f(280), KcalMax: f(380), AllergensPossible: []string{"gluten", "ouă"}},
-	{DishID: 15, Name: "Pârjoale <de casă>", Price: f(52.5)},
+	{DishID: 15, Name: "Pârjoale <de casă>", Price: f(52.5), Components: []string{"Supă de linte", "Piure"}},
 }
 
 func TestRecommendationText(t *testing.T) {
 	s := recommendationText("2026-10-29", picks, time.UTC)
-	for _, want := range []string{"joi, 29 oct", "Ciorbă de pui", "45 lei", "~280–380 kcal", "posibil: gluten, ouă", "52,50 lei", "&lt;de casă&gt;"} {
+	for _, want := range []string{"joi, 29 oct", "Ciorbă de pui", "45 lei", "~280–380 kcal", "posibil: gluten, ouă", "52,50 lei", "&lt;de casă&gt;", "Supă de linte, Piure"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("text has no %q:\n%s", want, s)
 		}

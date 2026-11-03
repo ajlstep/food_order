@@ -102,6 +102,9 @@ func recommendationText(date string, picks []contracts.Pick, loc *time.Location)
 		if len(facts) > 0 {
 			b.WriteString(" — " + strings.Join(facts, " · "))
 		}
+		if len(p.Components) > 0 {
+			fmt.Fprintf(&b, "\n   %s", esc(strings.Join(p.Components, ", ")))
+		}
 		if p.Reason != "" {
 			fmt.Fprintf(&b, "\n   <i>%s</i>", esc(p.Reason))
 		}
